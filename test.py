@@ -11,7 +11,6 @@ Description:
 '''
 glm-z1-flash
 glm-4-flash
-b193f25590a05afc5a99678fb7e340d2.3KwMgAhT6WyPgiuO
 '''
 from component.agent_init import Agent
 from component.registry_tools import get_tools, tool_registry
