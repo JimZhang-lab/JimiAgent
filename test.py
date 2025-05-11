@@ -2,7 +2,7 @@
 Author: JimZhang
 Date: 2025-05-08 21:44:13
 LastEditors: 很拉风的James
-LastEditTime: 2025-05-11 05:29:59
+LastEditTime: 2025-05-11 05:32:39
 FilePath: /Code/Project/JimiAgent/test.py
 Description: 
 
@@ -11,7 +11,6 @@ Description:
 '''
 glm-z1-flash
 glm-4-flash
-b193f25590a05afc5a99678fb7e340d2.3KwMgAhT6WyPgiuO
 '''
 from component.agent_init import Agent
 from component.registry_tools import get_tools, tool_registry
@@ -27,7 +26,6 @@ model_name = "glm-z1-flash"
 system_prompt = "你是一个聊天大师"
 description = "Agent1"
 description2 = "Agent2"
-
 
 @tool_registry({
     "date": "查询航班的日期，格式 YYYY-MM-DD",
