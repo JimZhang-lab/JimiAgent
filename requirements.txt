@@ -1,0 +1,40 @@
+# LangChain / LangGraph
+langchain>=1.2.0
+langchain-openai>=1.1.0
+langchain-anthropic>=1.4.0
+langgraph>=1.1.0
+langgraph-checkpoint>=4.0.0
+langgraph-checkpoint-sqlite>=2.0.0
+aiosqlite>=0.20.0
+
+# LlamaIndex (Skills Retrieval)
+llama-index-core>=0.12.0
+llama-index-embeddings-openai>=0.3.0
+llama-index-readers-file>=0.4.0
+# Hybrid 检索
+llama-index-retrievers-bm25>=0.5.0
+# QueryFusionRetriever 依赖
+llama-index-llms-openai>=0.3.0
+
+# API Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+websockets>=14.0
+# /api/upload 依赖
+python-multipart>=0.0.9
+
+# Computer Use
+# 默认不启用，但建议预装。
+pyautogui>=0.9.54
+mss>=9.0.1
+playwright>=1.42.0
+# 首次还需执行 `playwright install chromium`
+
+# Utilities
+pyyaml>=6.0
+click>=8.1.0
+rich>=14.0.0
+httpx>=0.28.0
+prompt_toolkit>=3.0.0
+croniter>=2.0
+ruamel.yaml>=0.18

@@ -172,3 +172,30 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# === JimiAgent runtime artefacts ===
+# 运行时数据目录（包含 SQLite 数据库、会话元信息、向量索引）
+# 注意：sessions.json 可能残留历史 metadata，建议忽略
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 配置备份文件
+.env
+.env.*
+!.env.example
+
+# Workspace 私有数据（按需忽略，公开模板除外）
+workspace/USER.md
+
+# 真实配置文件（含 API Key），只提交 .example.yaml 模板
+config/agent_config.yaml
+config/agent_config*.yaml
+!config/agent_config.example.yaml
+
+# macOS Finder 元数据
+.DS_Store
+**/.DS_Store
+logs/

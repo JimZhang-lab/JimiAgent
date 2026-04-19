@@ -1,0 +1,257 @@
+# JimiAgent 配置模板
+#
+# 用法：
+# 1. 复制为 config/agent_config.yaml
+# 2. 替换占位符
+# 3. 按实际接口调整 base_url
+#
+# 运行时配置统一在此；临时覆盖可用 JIMI_* 环境变量。
+
+agent:
+  # ===== 模型 =====
+  model:
+    provider: "openai"          # openai / anthropic
+    model_id: "qwen3-next-80b"  # 模型名
+    temperature: 0.7
+    max_tokens: 8192
+    streaming: true
+    api_key: "sk-REPLACE_ME"            # 主模型 Key
+    base_url: "https://api.openai.com/v1"  # OpenAI 兼容接口
+
+    # 可选备选模型；按顺序回退。
+    # fallbacks:
+    #   - provider: "openai"
+    #     model_id: "gpt-4o-mini"
+    #     api_key: "sk-REPLACE_ME"
+    #     base_url: "https://api.openai.com/v1"
+    #   - provider: "anthropic"
+    #     model_id: "claude-3-5-sonnet-20241022"
+    #     api_key: "sk-ant-REPLACE_ME"
+
+  # ===== Embedding =====
+  embedding:
+    model: "text-embedding-3-small"  # 支持自定义名
+    api_key: ""                      # 空则复用 model.api_key
+    base_url: ""                     # 空则复用 model.base_url
+
+  # ===== 多模态 =====
+  # 留空时自动回退到 model / embedding。
+  # vlm:
+  #   model_id: "qwen-vl-max"
+  #   # 其余字段默认继承 model
+  # vl_embedding:
+  #   model: "multimodal-embedding-v1"
+  #   # Key / URL 默认继承 embedding
+
+  # ===== Workspace =====
+  workspace: "./workspace"
+
+  # ===== Skills 检索 =====
+  skills:
+    top_k: 3                    # 每次返回的 Skill 数
+    similarity_threshold: 0.5   # vector_only 阈值
+    index_persist_dir: "./data/skill_index"
+
+    # --- Hybrid 检索 ---
+    # 默认 hybrid：BM25 + Vector + RRF。
+    # 降级：hybrid -> vector_only -> bm25_only -> 全量。
+    retrieval_mode: "hybrid"          # hybrid / vector_only / bm25_only
+    query_cache_ttl_seconds: 30       # 0 = 关闭缓存
+    query_cache_size: 128             # 缓存上限
+    exact_match_short_circuit: true   # skill_name / skill_key 直达
+    bm25_weight_name: 3               # name 权重
+    bm25_weight_description: 2        # description 权重
+
+  # ===== 记忆 =====
+  memory:
+    backend: "sqlite"
+    sqlite_path: "./data/memory.db"  # LangGraph checkpointer
+
+    # --- 长期记忆 ---
+    enabled: true                        # 总开关
+    store_path: "./data/memory_store.db" # 独立 SQLite
+    extract_on_compact: true             # compact 后抽取
+    recall_max_inject: 5                 # 每轮注入条数
+    dedup_threshold: 0.92                # 去重阈值
+    embedding_model: "auto"              # auto / off / 自定义
+
+    # --- 扩展项 ---
+    extract_mode: "per_turn"      # off / on_compact / per_turn
+    extract_timeout_seconds: 10   # per_turn 超时
+    namespace: "auto"             # auto = agent_name
+    procedural_inject_max: 10     # procedural 注入上限
+
+  # ===== 会话 =====
+  session:
+    max_history_messages: 50       # 历史消息上限
+    compact_threshold: 40          # 触发 compact
+    default_think_level: "medium"  # low / medium / high
+
+# ===== Gateway =====
+gateway:
+  host: "0.0.0.0"
+  port: 18789
+  # 生产环境请改为明确白名单。
+  cors_origins:
+    - "*"
+    # - "http://localhost:5173"
+    # - "https://yourdomain.com"
+
+# ===== 渠道 =====
+channels:
+  webchat:
+    enabled: true
+  terminal:
+    enabled: true
+  # Webhook: POST /api/webhook/<name>
+  # Body: {"sender_id":"...","message":"...","session_id":"可选"}
+  # dmPolicy: open / pairing / closed
+  # allowFrom 支持精确匹配、*、前缀通配。
+  # Header: X-Jimi-Webhook-Secret
+  # 管理命令: python cli.py pairing list|approve|revoke|add
+  # webhook:
+  #   enabled: true
+  #   secret: ""                # 空则不校验
+  #   session_prefix: "wh"      # sender_id 对应的 thread 前缀
+  #   dmPolicy: "pairing"       # open / pairing / closed
+  #   allowFrom: ["admin_*"]    # 静态白名单
+  # Telegram（预留）
+  # telegram:
+  #   enabled: false
+  #   mode: "long-poll"         # long-poll / webhook
+  #   bot_token: ""
+
+# ===== 日志 =====
+logging:
+  level: "INFO"                 # DEBUG / INFO / WARNING / ERROR
+  format: "rich"                # rich / plain
+  output: "console"             # console / file / both
+  file_path: "./logs/jimi.log"  # 相对 project root
+  rotate_mb: 10                 # 单文件上限（MB）
+  backup_count: 5               # 轮转保留数
+
+# ===== 定时任务 =====
+# Gateway 启动后按 cron 触发。
+# 每个 job 默认使用独立 session：cron-<id>。
+scheduler:
+  enabled: false                # 总开关
+  tick_seconds: 30              # 轮询间隔（秒）
+  jobs: []
+  # 示例：
+  # jobs:
+  #   - id: daily-brief
+  #     schedule: "0 9 * * *"     # 每天 09:00
+  #     prompt: "用三句话总结今天需要关注的事"
+  #     session_title: "每日提醒"
+  #     enabled: true
+  #   - id: weekly-recap
+  #     schedule: "0 18 * * 5"    # 每周五 18:00
+  #     prompt: "回顾本周重要会话的要点"
+  #     enabled: true
+  #   - id: evolver-hourly        # kind=evolver 时不走 LLM
+  #     kind: evolver             # 直接调 agent.evolver.run_cycle
+  #     schedule: "0 * * * *"
+  #     strategy: balanced        # balanced/innovate/harden/repair-only
+  #     enabled: false
+
+# ===== bash / shell 工具 =====
+# 开启后可在 workspace 内执行命令。
+# 防护：allowlist -> 危险模式拒绝 -> 写操作 confirm -> cwd/timeout/截断。
+# agent:
+#   bash:
+#     enabled: false
+#     allowlist: ["git", "ls", "cat", "pwd", "python", "pip", "node", "npm"]
+#     timeout_seconds: 30
+#     max_output_bytes: 4096
+
+# ===== 多 Agent 路由 =====
+# 不配置时自动退回单 agent。
+# agents:
+#   default_agent: main            # 默认 agent
+#   list:
+#     - name: main
+#       workspace: ./workspace
+#     - name: work
+#       workspace: ./workspaces/work
+#       model:
+#         model_id: gpt-4o
+#         api_key: "sk-..."
+#         base_url: ""
+#   routing:
+#     - match: { channel: webhook, name: slack-work }
+#       agent: work
+#     - match: { sender_id_prefix: "admin_" }
+#       agent: main
+
+# ===== OpenClaw 插件 =====
+# 支持 openclaw / claude / cursor / codex 清单。
+# 扫描顺序：load.paths -> workspace/.openclaw/plugins -> ~/.openclaw/plugins -> npm_store。
+# 只消费 manifest 静态字段和 skills，不执行插件内 TS/JS。
+#
+# plugins:
+#   enabled: true
+#   allow: []              # 空 = 全部允许；非空 = 仅启用列表内 id
+#   deny: []               # 黑名单，优先于 allow
+#   load:
+#     paths:               # 额外扫描路径
+#       - "~/Projects/oss/voice-call-extension"
+#   slots:
+#     memory: "memory-core"     # "none" 禁用；或由 <plugin-id> 提供
+#     contextEngine: "none"
+#   entries:                    # 单插件开关 / 配置覆盖
+#     voice-call:
+#       enabled: true
+#       config:
+#         provider: "twilio"
+#   install_registry: "~/.openclaw/plugins"     # /plugin install 目标目录
+#   npm_registry: "~/.openclaw/npm_store"       # npm 包安装目录（需 node+npm）
+
+# ===== Computer Use =====
+# 默认全关；启用前请先：
+#   pip install pyautogui mss playwright && playwright install chromium
+#   macOS 首次需授权「辅助功能」+「屏幕录制」给 Python/Terminal
+#
+# 安全链路：总开关 -> 分层开关 -> allow/deny -> 审计。
+#
+# agent:
+#   computer_use:
+#     enabled: false                      # 总开关
+#     desktop_enabled: true               # 鼠标/键盘/截图
+#     browser_enabled: true               # Playwright
+#     loop_agent_enabled: false           # VLM 任务循环，默认关闭
+#
+#     app_allowlist: []                   # 空 = 不限制
+#     app_denylist:                       # 硬拒绝
+#       - "com.apple.keychainaccess"
+#       - "com.apple.systempreferences"
+#       - "com.apple.Terminal"
+#     domain_allowlist: []
+#     domain_denylist:
+#       - "*bank*"
+#       - "*.alipay.com"
+#       - "*.icloud.com"
+#
+#     dangerous_keypress_deny:            # 高危快捷键
+#       - "cmd+shift+q"
+#       - "ctrl+alt+delete"
+#
+#     # 性能
+#     screenshot_max_width: 1920          # 送入 VLM 前的缩放上限
+#     action_delay_ms: 100                # 动作间延迟
+#     max_actions_per_task: 50            # 单任务最大步数
+#     loop_step_timeout_seconds: 30
+#
+#     # 浏览器模式
+#     browser_mode: "launch"              # launch / cdp
+#     browser_headless: false             # 默认 headful，便于观察
+#     browser_cdp_url: "http://localhost:9222"
+#     browser_user_data_dir: ""           # launch 模式下可指定 profile
+#     browser_downloads_dir: "./data/downloads"
+#
+#     # 审计
+#     audit_log_path: "./data/computer_use.jsonl"
+#     audit_thumbnails: true
+#     audit_thumbnail_dir: "./data/computer_use/thumbs"
+#
+#     # 前台 app 识别失败时的策略：deny / allow
+#     safety_fail_policy: "deny"
