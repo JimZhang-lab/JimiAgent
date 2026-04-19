@@ -1,10 +1,10 @@
 # JimiAgent
 
-> 基于 **LangChain / LangGraph** 的个人 AI 助手。Skills 语义召回、SQLite 持久化记忆、Web UI/CLI/REST 多前端、OpenClaw 插件生态兼容、多模态图文输入。
+> 基于 **LangChain / LangGraph** 的个人 AI 助手。Skills 语义召回、SQLite 持久化记忆、Web UI/CLI/REST 多前端、OpenClaw 插件生态兼容、多模态图文输入。项目以 **Apache-2.0** 协议开源。
 
 | Python | LangGraph | FastAPI | 许可证 |
 | :-: | :-: | :-: | :-: |
-| 3.12 | 1.1+ | 0.115+ | MIT |
+| 3.12 | 1.1+ | 0.115+ | Apache-2.0 |
 
 ---
 
@@ -1076,7 +1076,10 @@ A: `loop_agent_enabled` 默认 false；通常 Agent 在普通对话里只会按�
 
 ## 📜 License
 
-MIT — 详见 `LICENSE`。
+本项目采用 **Apache License 2.0**（SPDX: `Apache-2.0`）开源。
+
+- 完整协议文本见 `LICENSE`
+- 分发归属说明见 `NOTICE`
 
 ---
 
