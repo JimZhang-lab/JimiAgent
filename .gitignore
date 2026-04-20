@@ -199,3 +199,12 @@ config/agent_config*.yaml
 .DS_Store
 **/.DS_Store
 logs/
+
+# === TUI (Node/Ink) build artefacts ===
+tui/node_modules/
+tui/dist/
+tui/.yarn-error.log
+tui/yarn-error.log
+tui/*.tsbuildinfo
+tui/.vitest-cache/
+tui/coverage/

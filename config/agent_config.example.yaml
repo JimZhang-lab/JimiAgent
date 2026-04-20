@@ -87,6 +87,31 @@ agent:
     compact_threshold: 40          # 触发 compact
     default_think_level: "medium"  # low / medium / high
 
+  # ===== 全盘文件 / Shell 安全层 =====
+  # 打开后 Agent 可以读写全盘，但 dangerous 操作需要 confirm。
+  # 关闭则退化为"仅 workspace 内"（老行为）。
+  safety:
+    enabled: true                  # 总开关
+    confirm_mode: "auto"           # auto / ui / llm / off
+    # - "auto": UI 通道可用则走 LangGraph interrupt 弹框；否则退化 llm
+    # - "ui"  : 强制走 interrupt + TUI/前端弹框
+    # - "llm" : 返回 [PENDING CONFIRM] 让 LLM 询问用户，用户答复后 LLM 带 confirm=true 重试
+    # - "off" : 全放行（仅硬拒黑名单），不推荐
+    auto_approve_workspace_writes: true    # workspace 内写无需 confirm
+    confirm_timeout_seconds: 120           # UI 模式下等用户点击的超时
+    # 额外黑名单（fnmatch 风格）；在内置黑名单外追加
+    extra_path_deny: []
+    # 额外命令 denylist（regex，命中即硬拒）
+    extra_cmd_deny: []
+    # 额外视为 safe 的命令头（如 kubectl/docker 只读子命令）
+    extra_safe_cmd_heads: []
+
+  # ===== Shell 工具 =====
+  bash:
+    enabled: false                 # bash 工具默认关；打开后受 safety 控制
+    timeout_seconds: 30
+    max_output_bytes: 8192
+
 # ===== Gateway =====
 gateway:
   host: "0.0.0.0"

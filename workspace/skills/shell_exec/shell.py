@@ -1,16 +1,18 @@
 '''
 Author: JimZhang
-Date: 2026-04-18 22:10:00
-LastEditors: 很拉风的James
-LastEditTime: 2026-04-19 13:25:00
+LastEditors: Cascade
+LastEditTime: 2026-04-21
 FilePath: /JimiAgent/workspace/skills/shell_exec/shell.py
-Description: Shell Skill。
+Description: Shell Skill —— 统一走 server.core.safety_fs 判定。
 
+与 builtin `bash` 工具行为等价：
+- safe 命令直接执行；写/未知命令需 confirm=true；毁灭性命令硬拒
+- safety 关闭时退化为原有 BLOCKED_PATTERNS 黑名单
 '''
 import asyncio
 import re
 
-# 危险命令模式（绝对禁止）
+# 保留老常量，向后兼容其它 import 方
 BLOCKED_PATTERNS = [
     r"rm\s+-rf\s+/\s*$",
     r"rm\s+-rf\s+/\*",
@@ -21,27 +23,62 @@ BLOCKED_PATTERNS = [
     r"chmod\s+-R\s+777\s+/\s*$",
 ]
 
-# 输出截断长度
 MAX_OUTPUT_LENGTH = 5000
-
-# 命令超时（秒）
 COMMAND_TIMEOUT = 30
 
 
+def _load_settings():
+    from server.config.settings import get_settings
+    return get_settings()
+
+
+def _is_safety_on() -> bool:
+    try:
+        cfg = getattr(_load_settings(), "safety", None)
+        return bool(cfg and cfg.enabled)
+    except Exception:
+        return False
+
+
+def _pending_msg(summary: str, retry_hint: str) -> str:
+    return (
+        f"[PENDING CONFIRM] {summary}\n"
+        f"请把以上操作告知用户，得到同意后使用相同参数并附加 `confirm=true` 重试。\n"
+        f"若用户拒绝，请告知用户操作已取消。\n"
+        f"重试示例: {retry_hint}"
+    )
+
+
 def is_command_safe(command: str) -> tuple[bool, str]:
-    """检查命令是否安全"""
+    """legacy 黑名单：safety 关闭时用。"""
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, command):
             return False, f"命令被阻止: 匹配危险模式 '{pattern}'"
     return True, ""
 
 
-async def execute(command: str) -> str:
-    """执行 Shell 命令并返回输出"""
-    # 安全检查
-    is_safe, reason = is_command_safe(command)
-    if not is_safe:
-        return f"[blocked] {reason}"
+async def execute(command: str, confirm: bool = False) -> str:
+    """执行 Shell 命令并返回输出。
+
+    safety=on 时走分类器；safety=off 时退化黑名单。
+    """
+    if _is_safety_on():
+        from server.core.safety_fs import classify_command
+        s = _load_settings()
+        v = classify_command(
+            command,
+            extra_deny=list(s.safety.extra_cmd_deny),
+            extra_safe_heads=list(s.safety.extra_safe_cmd_heads),
+        )
+        if v.is_deny:
+            return f"[REJECTED] {v.reason}"
+        if v.needs_confirm and not confirm:
+            retry = f"execute(command={command!r}, confirm=True)"
+            return _pending_msg(v.summary, retry)
+    else:
+        is_safe, reason = is_command_safe(command)
+        if not is_safe:
+            return f"[blocked] {reason}"
 
     try:
         process = await asyncio.create_subprocess_shell(
@@ -67,9 +104,11 @@ async def execute(command: str) -> str:
 
         output = "\n".join(output_parts) if output_parts else "(无输出)"
 
-        # 截断过长输出
         if len(output) > MAX_OUTPUT_LENGTH:
-            output = output[:MAX_OUTPUT_LENGTH] + f"\n\n... [输出已截断, 总长度: {len(output)} 字符]"
+            output = (
+                output[:MAX_OUTPUT_LENGTH]
+                + f"\n\n... [输出已截断, 总长度: {len(output)} 字符]"
+            )
 
         exit_info = f"[退出码: {process.returncode}]"
         return f"{output}\n{exit_info}"

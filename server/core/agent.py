@@ -665,11 +665,16 @@ class JimiAgent:
     # J3 per-turn 抽取
 
     def _get_extract_lock(self, session_id: str):
-        """懒加载每个 session 的抽取锁。"""
+        """懒加载每个 session 的抽取锁。
+
+        S3：用 WeakValueDictionary —— 抽取完成且无引用时锁自动回收，
+        避免长期运行时 `_extract_locks` 按 session_id 无限堆积泄漏。
+        """
         import asyncio as _aio
+        import weakref
         locks = getattr(self, "_extract_locks", None)
         if locks is None:
-            locks = {}
+            locks = weakref.WeakValueDictionary()
             self._extract_locks = locks
         lock = locks.get(session_id)
         if lock is None:
@@ -836,6 +841,23 @@ class JimiAgent:
 
         result = await agent.ainvoke(input_messages, config=config)
 
+        # 先检测是否卡在 interrupt —— 非流式场景无法双向交互，返回提示
+        paused = await self._check_interrupts(agent, config)
+        if paused:
+            first = paused[0]
+            summary = (
+                first.get("payload", {}).get("summary") if isinstance(
+                    first.get("payload"), dict
+                ) else str(first.get("payload", ""))
+            ) or "未知操作"
+            return (
+                f"[等待确认] 存在 {len(paused)} 项危险操作需要批准：{summary}\n"
+                "非流式 /api/chat 不支持实时 confirm，请改用流式接口 "
+                "（/api/events 或 WebSocket /ws/chat），或在 yaml 里把 "
+                "`safety.confirm_mode` 改为 `llm` 让 LLM 中转。",
+                session_id,
+            )
+
         messages = result.get("messages", [])
         for msg in reversed(messages):
             if isinstance(msg, AIMessage) and msg.content:
@@ -899,58 +921,24 @@ class JimiAgent:
         has_content = False
         ai_chunks: list[str] = []
         try:
-            async for event in agent.astream_events(
-                input_messages, config=config, version="v2"
+            async for ev in self._iter_stream_events(
+                agent, input_messages, config=config, trace_on=trace_on,
+                session_id=session_id, ai_chunks=ai_chunks,
             ):
-                kind = event.get("event", "")
-
-                # trace 透传轻量 meta
-                if trace_on:
-                    yield {
-                        "type": "trace",
-                        "event": kind,
-                        "name": event.get("name", ""),
-                        "run_id": event.get("run_id", ""),
-                    }
-
-                if kind == "on_chat_model_stream":
-                    chunk = event.get("data", {}).get("chunk")
-                    if chunk and getattr(chunk, "content", None):
-                        content = chunk.content
-                        if isinstance(content, list):
-                            content = "".join(
-                                part.get("text", "") if isinstance(part, dict) else str(part)
-                                for part in content
-                            )
-                        if content:
-                            has_content = True
-                            ai_chunks.append(content)
-                            yield {"type": "text", "content": content}
-
-                elif kind == "on_tool_start":
-                    tool_name = event.get("name", "unknown")
-                    self._log_tool_call(tool_name, "start", session_id=session_id)
-                    yield {"type": "tool", "name": tool_name}
-
-                elif kind == "on_tool_end":
-                    # 成功收尾
-                    self._log_tool_call(
-                        event.get("name", "unknown"), "ok",
-                        session_id=session_id,
-                    )
-
-                elif kind == "on_tool_error":
-                    tool_name = event.get("name", "unknown")
-                    err = event.get("data", {}).get("error")
-                    self._log_tool_call(
-                        tool_name, "error",
-                        error=str(err) if err else "",
-                        session_id=session_id,
-                    )
-
+                if ev.get("type") == "text":
+                    has_content = True
+                yield ev
         except Exception as e:
             logger.error(f"Agent 流式执行失败: {e}", exc_info=True)
             yield {"type": "error", "content": f"{type(e).__name__}: {e}"}
+            return
+
+        # 检查是否卡在 interrupt（dangerous 操作等待用户 confirm）
+        paused = await self._check_interrupts(agent, config)
+        if paused:
+            for pay in paused:
+                yield {"type": "confirm_required", **pay}
+            # 流暂停；等外部调 chat_stream_resume 继续
             return
 
         if not has_content:
@@ -961,6 +949,143 @@ class JimiAgent:
         # 流结束后后台抽取
         if ai_chunks:
             self._schedule_hot_extract(session_id, message, "".join(ai_chunks))
+
+    async def _iter_stream_events(
+        self,
+        agent,
+        input_or_command,
+        *,
+        config: dict,
+        trace_on: bool,
+        session_id: str,
+        ai_chunks: list[str],
+    ):
+        """astream_events 统一解析（chat_stream 与 chat_stream_resume 共用）。"""
+        async for event in agent.astream_events(
+            input_or_command, config=config, version="v2",
+        ):
+            kind = event.get("event", "")
+
+            if trace_on:
+                yield {
+                    "type": "trace",
+                    "event": kind,
+                    "name": event.get("name", ""),
+                    "run_id": event.get("run_id", ""),
+                }
+
+            if kind == "on_chat_model_stream":
+                chunk = event.get("data", {}).get("chunk")
+                if chunk and getattr(chunk, "content", None):
+                    content = chunk.content
+                    if isinstance(content, list):
+                        content = "".join(
+                            part.get("text", "") if isinstance(part, dict) else str(part)
+                            for part in content
+                        )
+                    if content:
+                        ai_chunks.append(content)
+                        yield {"type": "text", "content": content}
+
+            elif kind == "on_tool_start":
+                tool_name = event.get("name", "unknown")
+                self._log_tool_call(tool_name, "start", session_id=session_id)
+                yield {"type": "tool", "name": tool_name}
+
+            elif kind == "on_tool_end":
+                self._log_tool_call(
+                    event.get("name", "unknown"), "ok",
+                    session_id=session_id,
+                )
+
+            elif kind == "on_tool_error":
+                tool_name = event.get("name", "unknown")
+                err = event.get("data", {}).get("error")
+                self._log_tool_call(
+                    tool_name, "error",
+                    error=str(err) if err else "",
+                    session_id=session_id,
+                )
+
+    async def _check_interrupts(self, agent, config: dict) -> list[dict]:
+        """读 graph 当前 state 的 interrupts。
+
+        返回每条 interrupt 对应的结构化 payload：
+          {"interrupt_id": "...", "payload": {...原始 interrupt.value...}}
+        """
+        try:
+            state = await agent.aget_state(config)
+        except Exception as e:
+            logger.debug(f"aget_state 失败: {e}")
+            return []
+        intrs = getattr(state, "interrupts", None) or ()
+        results: list[dict] = []
+        for intr in intrs:
+            try:
+                results.append({
+                    "interrupt_id": getattr(intr, "id", ""),
+                    "payload": getattr(intr, "value", {}),
+                    "resumable": bool(getattr(intr, "resumable", True)),
+                })
+            except Exception:
+                continue
+        return results
+
+    async def chat_stream_resume(
+        self,
+        session_id: str,
+        approve: bool,
+    ):
+        """恢复被 interrupt 暂停的会话流。
+
+        前提：`chat_stream` 已 yield 过 `confirm_required`。
+        `approve=True` → tool 执行；`approve=False` → tool 返回 [CANCELLED]。
+        """
+        from langgraph.types import Command
+        await self._ensure_initialized()
+
+        # resume 时不知道当轮 query，用全量 tools 保证 graph 结构完整
+        think_level = self._get_think_level(session_id)
+        tools = list(self._builtin_tools)
+        try:
+            tools.extend(self.skill_retriever.get_all_tools())
+        except Exception as e:
+            logger.debug(f"resume 时拉取 skills 失败: {e}")
+        # 去重
+        seen: set[str] = set()
+        uniq = []
+        for t in tools:
+            if t.name not in seen:
+                seen.add(t.name)
+                uniq.append(t)
+
+        agent = self._build_agent(uniq, think_level, use_vlm=False)
+        config = {"configurable": {"thread_id": session_id}}
+
+        ai_chunks: list[str] = []
+        sess = self.session_mgr.get_session(session_id)
+        trace_on = (sess.metadata.get("trace", "off") == "on") if sess else False
+
+        try:
+            async for ev in self._iter_stream_events(
+                agent, Command(resume=approve), config=config,
+                trace_on=trace_on, session_id=session_id, ai_chunks=ai_chunks,
+            ):
+                yield ev
+        except Exception as e:
+            logger.error(f"resume 流式执行失败: {e}", exc_info=True)
+            yield {"type": "error", "content": f"{type(e).__name__}: {e}"}
+            return
+
+        # resume 后可能还有后续 interrupt（tool 在下一次 call 又 dangerous）
+        paused = await self._check_interrupts(agent, config)
+        if paused:
+            for pay in paused:
+                yield {"type": "confirm_required", **pay}
+            return
+
+        if ai_chunks:
+            self._schedule_hot_extract(session_id, "", "".join(ai_chunks))
 
     # ===== 会话清空 / 压缩 =====
 

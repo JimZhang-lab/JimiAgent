@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jimiagent"
+version = "0.1.0"
+description = "JimiAgent — agent framework with React/Ink terminal UI"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[project.scripts]
+# `pip install -e .` 之后，`jimi` 成为当前 Python 环境 bin/ 下的可执行文件
+jimi = "cli:cli"
+
+[tool.setuptools]
+# cli.py 与 main.py 是顶层模块，不在 server/ 包内
+py-modules = ["cli", "main"]
+
+[tool.setuptools.packages.find]
+include = ["server*"]
+exclude = ["tui*", "data*", "logs*", "docs*", "reference*", "workspace*", "config*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }

@@ -2,17 +2,27 @@
 Author: JimZhang
 Date: 2026-04-19 14:00:00
 LastEditors: 很拉风的James
-LastEditTime: 2026-04-19 14:00:00
+LastEditTime: 2026-04-21 02:00:00
 FilePath: /JimiAgent/server/core/tui.py
-Description: 终端聊天 UI。
+Description: 【已废弃 DEPRECATED】旧版基于 rich.live + prompt_toolkit 的终端 UI。
+             仅作为 `jimi chat --classic` 的 fallback；将在下一版本移除。
+             新 UI 请见 tui/（React + Ink）与 server/core/tui_worker.py。
 
 '''
 from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from pathlib import Path
 from typing import Optional
+
+warnings.warn(
+    "server.core.tui 已废弃：新 TUI 见 tui/（React + Ink）与 server/core/tui_worker.py；"
+    "该模块仅作为 `jimi chat --classic` 的临时 fallback，将在下一版本移除。",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -197,6 +207,8 @@ class StreamRenderer:
         self.buffer: str = ""
         self.new_session_id: Optional[str] = None
         self.had_output: bool = False
+        # Stage 2: 遇到 confirm_required 时，把 payload 记下让外层 run_chat 处理
+        self.pending_confirms: list[dict] = []
 
     def _render_panel(self) -> Panel:
         body = Markdown(self.buffer) if self.buffer else Text("...", style="dim")
@@ -265,6 +277,18 @@ class StreamRenderer:
                             border_style="red",
                         )
                     )
+
+                elif etype == "confirm_required":
+                    # 收到 dangerous 操作的 confirm 请求；暂停 live 并记录，
+                    # 让 run_chat 外层主循环弹 y/n 后调 chat_stream_resume
+                    if live is not None:
+                        live.stop()
+                        live = None
+                    self.pending_confirms.append({
+                        "interrupt_id": event.get("interrupt_id", ""),
+                        "payload": event.get("payload", {}),
+                        "resumable": event.get("resumable", True),
+                    })
         finally:
             if live is not None:
                 # 结束前再刷新一次
@@ -272,6 +296,87 @@ class StreamRenderer:
                     live.update(self._render_panel())
                 finally:
                     live.stop()
+
+
+async def _run_stream_with_confirm_loop(
+    agent,
+    first_stream,
+    *,
+    session_id: str,
+    console: Console,
+    prompt_session,
+) -> "StreamRenderer":
+    """跑一轮 chat_stream；若遇到 confirm_required 就弹 y/n 后调 chat_stream_resume。
+
+    直到流自然结束（无新的 pending_confirms）才返回最后一个 renderer。
+    """
+    current_stream = first_stream
+    renderer: Optional[StreamRenderer] = None
+
+    while True:
+        renderer = StreamRenderer(console)
+        try:
+            await renderer.consume(current_stream)
+        except asyncio.CancelledError:
+            # 关闭当前 stream
+            try:
+                await current_stream.aclose()
+            except Exception:
+                pass
+            raise
+
+        # 主动关闭流，释放 graph 资源
+        try:
+            await current_stream.aclose()
+        except Exception:
+            pass
+
+        if not renderer.pending_confirms:
+            return renderer
+
+        # 处理全部 pending 中的第 1 个（LangGraph 一次只能 resume 一个 interrupt）
+        confirm = renderer.pending_confirms[0]
+        payload = confirm.get("payload") or {}
+        summary = payload.get("summary") or str(payload)
+        detail_lines = []
+        detail = payload.get("detail")
+        if isinstance(detail, dict):
+            for k, v in detail.items():
+                val = str(v)
+                if len(val) > 240:
+                    val = val[:240] + "…"
+                detail_lines.append(f"  [dim]{k}[/dim]: {val}")
+
+        console.print(
+            Panel(
+                (
+                    f"[bold yellow]{summary}[/bold yellow]\n"
+                    + ("\n".join(detail_lines) if detail_lines else "")
+                ),
+                title="[yellow]⚠ 需要确认[/yellow]",
+                border_style="yellow",
+                padding=(0, 1),
+            )
+        )
+
+        # 弹 y/n；Ctrl+C 视为拒绝
+        approve = False
+        try:
+            resp = await prompt_session.prompt_async(
+                FormattedText([("class:prompt", "确认执行? [y/N] ")])
+            )
+            approve = resp.strip().lower() in ("y", "yes", "approve", "ok", "1")
+        except (KeyboardInterrupt, EOFError):
+            approve = False
+            console.print("[dim](已取消)[/dim]")
+
+        console.print(
+            "[green]→ 已批准[/green]" if approve else "[yellow]→ 已拒绝[/yellow]"
+        )
+
+        # 以 Command(resume=approve) 继续流
+        current_stream = agent.chat_stream_resume(session_id, approve)
+        # 下一轮 while 再 consume
 
 
 async def run_chat(
@@ -334,24 +439,25 @@ async def run_chat(
                 continue
 
             # 其余输入统一走 Agent.chat_stream
-            renderer = StreamRenderer(console)
-            stream_task: Optional[asyncio.Task] = None
             try:
-                stream = agent.chat_stream(user_input, session_id)
-                stream_task = asyncio.create_task(renderer.consume(stream))
-                await stream_task
+                renderer = await _run_stream_with_confirm_loop(
+                    agent, agent.chat_stream(user_input, session_id),
+                    session_id=session_id,
+                    console=console,
+                    prompt_session=prompt_session,
+                )
             except asyncio.CancelledError:
                 console.print("[yellow](已中断)[/yellow]")
+                renderer = None
             except KeyboardInterrupt:
-                # 理论上不会走到这里
-                if stream_task and not stream_task.done():
-                    stream_task.cancel()
                 console.print("[yellow](已中断)[/yellow]")
+                renderer = None
             except Exception as e:
                 logger.exception("chat_stream 异常")
                 console.print(f"[red]错误: {type(e).__name__}: {e}[/red]")
+                renderer = None
 
-            if renderer.new_session_id:
+            if renderer and renderer.new_session_id:
                 session_id = renderer.new_session_id
 
             console.print()  # 每轮留一行空白

@@ -488,6 +488,13 @@ class SkillRetriever:
         for m in always_skills:
             _add(m)
 
+        # S2：空 query 短路 —— 无检索依据，返回 always + 全量（供下游自行决定）
+        q_stripped = (query or "").strip()
+        if not q_stripped:
+            for m in self._skill_metas.values():
+                _add(m)
+            return results
+
         # Step 2: 精确名匹配
         for m in self._exact_name_matches(query):
             _add(m)
@@ -500,13 +507,15 @@ class SkillRetriever:
             return results
 
         try:
+            # P2：缓存 key 标准化，避免大小写 / 首尾空格导致重复 miss
+            cache_key = q_stripped.lower()
             nodes = None
             if self._query_cache is not None:
-                nodes = self._query_cache.get(query)
+                nodes = self._query_cache.get(cache_key)
             if nodes is None:
                 nodes = self._active_retriever.retrieve(query)
                 if self._query_cache is not None:
-                    self._query_cache.put(query, nodes)
+                    self._query_cache.put(cache_key, nodes)
 
             # Step 5: 阈值过滤 + 去重
             # threshold 仅在 vector_only 下生效

@@ -27,6 +27,12 @@ class ChatResponse(BaseModel):
     session_id: str = Field(..., description="会话 ID")
 
 
+class ResumeRequest(BaseModel):
+    """resume 请求 —— 批准或拒绝上一轮 confirm_required 事件。"""
+    session_id: str = Field(..., description="要恢复的会话 ID")
+    approve: bool = Field(..., description="True=批准执行；False=取消")
+
+
 class SessionInfo(BaseModel):
     """会话信息"""
     id: str

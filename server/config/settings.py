@@ -124,6 +124,30 @@ class LoggingConfig:
 
 
 @dataclass
+class SafetyConfig:
+    """全盘文件访问 + 命令执行的安全层配置。
+
+    - `enabled`: 关则退化为 workspace-only（兼容旧行为）
+    - `extra_path_deny` / `extra_cmd_deny`: 用户扩展黑名单（fnmatch / regex）
+    - `extra_safe_cmd_heads`: 用户扩展的 safe 命令头（如 `kubectl`）
+    - `confirm_mode`:
+        * "ui"      — dangerous 操作走 LangGraph interrupt，等前端/TUI confirm
+        * "llm"     — 返回 [PENDING CONFIRM]，让 LLM 询问用户后带 confirm=true 再调
+        * "auto"    — 优先 ui；runtime 无 interrupt 支持时退化为 llm
+        * "off"     — 全部 allow（不推荐，等价放开所有）
+    - `auto_approve_workspace_writes`: workspace 内写默认视为 safe（无需 confirm）
+    """
+    enabled: bool = True
+    extra_path_deny: list = field(default_factory=list)
+    extra_cmd_deny: list = field(default_factory=list)
+    extra_safe_cmd_heads: list = field(default_factory=list)
+    confirm_mode: str = "auto"
+    auto_approve_workspace_writes: bool = True
+    # 等 confirm 的秒数，超时默认拒绝
+    confirm_timeout_seconds: int = 120
+
+
+@dataclass
 class BashConfig:
     """bash 工具配置。"""
     enabled: bool = False
@@ -255,6 +279,7 @@ class Settings:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
     bash: BashConfig = field(default_factory=BashConfig)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     computer_use: ComputerUseConfig = field(default_factory=ComputerUseConfig)
 
@@ -376,6 +401,13 @@ def _parse_config(raw: dict) -> Settings:
     bash_raw = dict(agent_cfg.get("bash") or {})
     bash = BashConfig(**bash_raw) if bash_raw else BashConfig()
 
+    # safety（全盘文件访问 + 命令执行）
+    safety_raw = dict(agent_cfg.get("safety") or {})
+    safety_valid = {f.name for f in fields(SafetyConfig)}
+    safety = SafetyConfig(
+        **{k: v for k, v in safety_raw.items() if k in safety_valid}
+    )
+
     # plugins
     plugins_raw = raw.get("plugins") or {}
     load_paths: list = []
@@ -437,6 +469,7 @@ def _parse_config(raw: dict) -> Settings:
         scheduler=scheduler,
         agents=agents,
         bash=bash,
+        safety=safety,
         plugins=plugins,
         computer_use=computer_use,
     )

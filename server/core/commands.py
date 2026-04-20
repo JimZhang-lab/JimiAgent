@@ -104,6 +104,9 @@ class CommandDispatcher:
             "recall": self._cmd_recall,
             "recall_at": self._cmd_recall_at,
             "forget": self._cmd_forget,
+            "rm_session": self._cmd_rm_session,
+            "rmsess": self._cmd_rm_session,
+            "delete_session": self._cmd_rm_session,
             "plugin": self._cmd_plugin,
             "plugins": self._cmd_plugin,
             "computer_use": self._cmd_computer_use,
@@ -300,7 +303,8 @@ class CommandDispatcher:
                 "| `/memories [kind=semantic\\|clear yes]` | 列出/清空跨会话长期记忆 |\n"
                 "| `/recall <query>` | 检索长期记忆 |\n"
                 "| `/recall_at <ts> [subject=... predicate=...]` | 时间三元组查询 |\n"
-                "| `/forget <id>` | 软删某条记忆 |\n"
+                "| `/forget <id>\\|stale\\|all yes` | 删单条记忆 / 清污染 / 清全部 |\n"
+                "| `/rm_session <id>\\|empty yes` | 删会话（含 checkpointer） |\n"
                 "| `/plugin list\\|show\\|enable\\|disable\\|install\\|uninstall\\|doctor` | OpenClaw 插件管理 |\n"
                 "| `/computer_use [on\\|off\\|status]` 或 `/computer_use <desktop\\|browser\\|loop> on\\|off` | AI 操控电脑开关（M 组） |\n"
                 "| `/help` | 显示本帮助 |"
@@ -408,6 +412,18 @@ class CommandDispatcher:
             return CommandResult(handled=True, response=f"重载失败: {e}")
 
         self.agent.settings = new_settings
+        # S5：新 settings 已生效，无论后续重建是否成功，旧 graph cache 必须失效
+        # 否则下一轮对话走旧 graph + 新 settings，行为不一致
+        self.agent.invalidate_agent_cache()
+        # 清 Workspace 的 system_prompt cache —— 让 AGENTS.md / TOOLS.md / SOUL.md / USER.md
+        # 的改动在下一轮对话生效，无需重启 Gateway
+        try:
+            ws = getattr(self.agent, "workspace", None)
+            if ws is not None and hasattr(ws, "reload"):
+                ws.reload()
+        except Exception as e:
+            logger.debug(f"workspace.reload 失败（忽略）: {e}")
+
         extra_notes: list[str] = []
         try:
             self.agent.llm = self.agent._create_llm()
@@ -415,13 +431,10 @@ class CommandDispatcher:
             return CommandResult(
                 handled=True,
                 response=(
-                    f"配置已重载但重建 LLM 失败: {e}\n"
+                    f"配置已重载、Agent graph 缓存已清空，但重建 LLM 失败: {e}\n"
                     "建议重启 Gateway。"
                 ),
             )
-
-        # 清 Agent graph 缓存
-        self.agent.invalidate_agent_cache()
 
         # 热重载 Scheduler
         sched = getattr(self.agent, "scheduler", None)
@@ -554,10 +567,17 @@ class CommandDispatcher:
         mems = store.list_recent(limit=20, kinds=kinds)
         if not mems:
             return CommandResult(handled=True, response="暂无长期记忆。")
-        lines = [f"近 {len(mems)} 条长期记忆："]
+        # Markdown 列表格式：每条一行，id 粗体 + code 样式便于复制
+        # 用法提示：`/forget <id>` 删单条；`/forget stale` 批量清「AI 能力边界」类
+        lines = [f"**近 {len(mems)} 条长期记忆**（`/forget <id>` 单删 · `/forget stale` 批量清污染）：", ""]
         for m in mems:
             day = m.updated_at[:10]
-            lines.append(f"  [{m.id}] [{m.kind}] {m.text}  ({day}, hits={m.hits})")
+            text = m.text.replace("\n", " ").strip()
+            if len(text) > 100:
+                text = text[:100] + "…"
+            lines.append(
+                f"- **`#{m.id}`** `[{m.kind}]` {text}  _· {day} · hits={m.hits}_"
+            )
         return CommandResult(handled=True, response="\n".join(lines))
 
     async def _cmd_recall(self, arg: str, session_id: str) -> CommandResult:
@@ -625,22 +645,151 @@ class CommandDispatcher:
         return CommandResult(handled=True, response="\n".join(lines))
 
     async def _cmd_forget(self, arg: str, session_id: str) -> CommandResult:
-        """软删某条长期记忆"""
+        """软删某条长期记忆 / 批量清污染
+
+        `/forget <id>`   删指定条
+        `/forget stale`  批量清"AI 能力边界/沙箱规则"类幻觉记忆
+        `/forget all yes` 清所有记忆（等同 /memories clear yes）
+        """
         store = getattr(self.agent, "memory_store", None)
         if store is None:
             return CommandResult(
                 handled=True, response="（记忆系统未启用）",
             )
+        a = arg.strip().lower()
+        if not a:
+            return CommandResult(
+                handled=True,
+                response=(
+                    "用法：\n"
+                    "- `/forget <id>` 删指定记忆\n"
+                    "- `/forget stale` 批量清「AI 能力边界」类污染\n"
+                    "- `/forget all yes` 清空所有记忆"
+                ),
+            )
+        if a == "stale":
+            from server.core.memory_store import _looks_like_capability_claim
+            try:
+                mems = store.list_recent(limit=10000)
+            except Exception as e:
+                return CommandResult(handled=True, response=f"读取失败: {e}")
+            hits = [m for m in mems if _looks_like_capability_claim(m.text)]
+            deleted = sum(1 for m in hits if store.delete(m.id))
+            if not hits:
+                return CommandResult(
+                    handled=True, response="（未发现「AI 能力边界」类记忆，已干净）",
+                )
+            return CommandResult(
+                handled=True,
+                response=(
+                    f"已清除 **{deleted}** 条「AI 能力边界」类幻觉记忆"
+                    f"（命中 {len(hits)}）。"
+                ),
+            )
+        if a.startswith("all"):
+            tail = a.split(None, 1)[1] if " " in a else ""
+            if tail != "yes":
+                return CommandResult(
+                    handled=True,
+                    response="⚠️ 将清空**所有**长期记忆，确认请输入 `/forget all yes`",
+                )
+            try:
+                mems = store.list_recent(limit=10000)
+                deleted = sum(1 for m in mems if store.delete(m.id))
+                return CommandResult(
+                    handled=True, response=f"已清空 {deleted} 条记忆。",
+                )
+            except Exception as e:
+                return CommandResult(handled=True, response=f"清空失败: {e}")
+
         try:
-            mid = int(arg.strip())
+            mid = int(a)
         except ValueError:
             return CommandResult(
-                handled=True, response="用法: `/forget <数字 id>`",
+                handled=True,
+                response="用法: `/forget <id>` 或 `/forget stale` 或 `/forget all yes`",
             )
         ok = store.delete(mid)
         return CommandResult(
             handled=True,
             response=f"已删除 id={mid}" if ok else f"未找到 id={mid} 或已删除",
+        )
+
+    async def _cmd_rm_session(self, arg: str, session_id: str) -> CommandResult:
+        """删除会话（含 checkpointer thread + session.json 条目）
+
+        `/rm_session <id>` 删指定会话
+        `/rm_session empty yes` 删所有 msg=0 的空会话
+        """
+        sm = self.agent.session_mgr
+        target = arg.strip()
+
+        if not target:
+            return CommandResult(
+                handled=True,
+                response=(
+                    "用法：\n"
+                    "- `/rm_session <session_id>` 删指定会话\n"
+                    "- `/rm_session empty yes` 批量删所有 msg=0 的空会话\n"
+                    "（别名: `/rmsess` / `/delete_session`）"
+                ),
+            )
+
+        # 批量清空会话
+        if target.lower().startswith("empty"):
+            tail = target.lower().split(None, 1)[1] if " " in target else ""
+            if tail != "yes":
+                empties = [s for s in sm.list_sessions() if s.message_count == 0]
+                return CommandResult(
+                    handled=True,
+                    response=(
+                        f"将删除 **{len(empties)}** 个空会话（msg=0）。"
+                        f"\n确认请输入 `/rm_session empty yes`"
+                    ),
+                )
+            empties = [s for s in sm.list_sessions() if s.message_count == 0]
+            deleted = 0
+            for s in empties:
+                if s.id == session_id:
+                    continue  # 跳过当前
+                try:
+                    await self.agent.clear_session_history(s.id)
+                except Exception as e:
+                    logger.debug(f"清 checkpointer thread 失败: {e}")
+                if sm.delete_session(s.id):
+                    deleted += 1
+            return CommandResult(
+                handled=True,
+                response=f"已删除 **{deleted}/{len(empties)}** 个空会话。",
+            )
+
+        # 单个删
+        if target == session_id:
+            return CommandResult(
+                handled=True,
+                response=(
+                    f"不能删除当前会话 `{target}`。\n"
+                    "请先用 `/new` 或 `/sessions` 切到别的会话后再删。"
+                ),
+            )
+        sess = sm.get_session(target)
+        if sess is None:
+            return CommandResult(
+                handled=True, response=f"未找到会话 `{target}`",
+            )
+        # 1) 清 LangGraph checkpointer thread
+        try:
+            await self.agent.clear_session_history(target)
+        except Exception as e:
+            logger.debug(f"清 checkpointer thread 失败（忽略）: {e}")
+        # 2) 删 sessions.json
+        deleted = sm.delete_session(target)
+        return CommandResult(
+            handled=True,
+            response=(
+                f"已删除会话 `{target}`（标题: {sess.title}）"
+                if deleted else f"删除失败：sessions.json 里找不到 `{target}`"
+            ),
         )
 
     # 插件管理

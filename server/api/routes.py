@@ -29,6 +29,7 @@ from fastapi.responses import StreamingResponse
 from server.api.models import (
     ChatRequest,
     ChatResponse,
+    ResumeRequest,
     SessionInfo,
     SessionCreateRequest,
     SkillInfo,
@@ -603,6 +604,57 @@ def _sse_format(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {payload}\n\n"
 
 
+async def _sse_relay_agent_stream(stream, http_request: Request):
+    """把 agent.chat_stream / chat_stream_resume 的事件转发成 SSE 帧。
+
+    识别的事件类型：
+    - text            → event: stream
+    - tool            → event: tool
+    - session         → event: session（/new 切换会话）
+    - confirm_required→ event: confirm_required（前端应弹框、调 /api/resume/events）
+    - error           → event: error
+    结束后自动 emit `event: end`。客户端断开时优雅结束。
+    """
+    try:
+        async for event in stream:
+            if await http_request.is_disconnected():
+                logger.info("SSE 客户端已断开，提前终止流")
+                break
+
+            etype = event.get("type")
+            if etype == "text":
+                yield _sse_format("stream", {"content": event.get("content", "")})
+            elif etype == "tool":
+                yield _sse_format("tool", {"name": event.get("name", "unknown")})
+            elif etype == "session":
+                yield _sse_format(
+                    "session", {"session_id": event.get("session_id")}
+                )
+            elif etype == "confirm_required":
+                yield _sse_format("confirm_required", {
+                    "interrupt_id": event.get("interrupt_id", ""),
+                    "payload": event.get("payload", {}),
+                    "resumable": event.get("resumable", True),
+                })
+            elif etype == "error":
+                yield _sse_format("error", {"content": event.get("content", "")})
+
+        yield _sse_format("end", {})
+    except asyncio.CancelledError:
+        logger.info("SSE 流被取消（客户端断开或服务关闭）")
+        raise
+    except Exception as e:
+        logger.error(f"SSE 流异常: {e}", exc_info=True)
+        yield _sse_format(
+            "error", {"content": f"{type(e).__name__}: {e}"}
+        )
+    finally:
+        try:
+            await stream.aclose()
+        except Exception:
+            pass
+
+
 @router.post("/api/events")
 async def chat_events(request: ChatRequest, http_request: Request):
     """SSE 流式聊天端点"""
@@ -616,45 +668,11 @@ async def chat_events(request: ChatRequest, http_request: Request):
     async def _generator():
         # 首帧先发 session
         yield _sse_format("session", {"session_id": session_id})
-
         stream = agent.chat_stream(
             request.message, session_id, images=request.images,
         )
-        try:
-            async for event in stream:
-                # 断连后停止推送
-                if await http_request.is_disconnected():
-                    logger.info("SSE 客户端已断开，提前终止流")
-                    break
-
-                etype = event.get("type")
-                if etype == "text":
-                    yield _sse_format("stream", {"content": event.get("content", "")})
-                elif etype == "tool":
-                    yield _sse_format("tool", {"name": event.get("name", "unknown")})
-                elif etype == "session":
-                    # /new 会切换会话
-                    yield _sse_format(
-                        "session", {"session_id": event.get("session_id")}
-                    )
-                elif etype == "error":
-                    yield _sse_format("error", {"content": event.get("content", "")})
-
-            yield _sse_format("end", {})
-        except asyncio.CancelledError:
-            logger.info("SSE 流被取消（客户端断开或服务关闭）")
-            raise
-        except Exception as e:
-            logger.error(f"SSE 流异常: {e}", exc_info=True)
-            yield _sse_format(
-                "error", {"content": f"{type(e).__name__}: {e}"}
-            )
-        finally:
-            # 主动关闭生成器
-            try:
-                await stream.aclose()
-            except Exception:
-                pass
+        async for frame in _sse_relay_agent_stream(stream, http_request):
+            yield frame
 
     return StreamingResponse(
         _generator(),
@@ -666,6 +684,74 @@ async def chat_events(request: ChatRequest, http_request: Request):
             "Connection": "keep-alive",
         },
     )
+
+
+@router.post("/api/resume/events")
+async def chat_resume_events(request: ResumeRequest, http_request: Request):
+    """SSE 流式 resume 端点：批准 / 拒绝 `confirm_required` 后继续上一轮的流。
+
+    适用场景：前端收到 SSE `confirm_required` 后，调本端点继续接后续事件。
+    """
+    agent = get_agent()
+
+    async def _generator():
+        yield _sse_format("session", {"session_id": request.session_id})
+        stream = agent.chat_stream_resume(request.session_id, request.approve)
+        async for frame in _sse_relay_agent_stream(stream, http_request):
+            yield frame
+
+    return StreamingResponse(
+        _generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@router.post("/api/resume")
+async def chat_resume_nonstream(request: ResumeRequest):
+    """非流式 resume：对某会话批准/拒绝后，等 agent 跑完返回最终 AI 回复。
+
+    给不支持 SSE 的客户端用；内部会消费完整 stream 拼接文本。
+    """
+    agent = get_agent()
+
+    text_parts: list[str] = []
+    next_confirm: dict | None = None
+    try:
+        async for event in agent.chat_stream_resume(
+            request.session_id, request.approve,
+        ):
+            etype = event.get("type")
+            if etype == "text":
+                text_parts.append(event.get("content", ""))
+            elif etype == "confirm_required" and next_confirm is None:
+                next_confirm = {
+                    "interrupt_id": event.get("interrupt_id", ""),
+                    "payload": event.get("payload", {}),
+                    "resumable": event.get("resumable", True),
+                }
+            elif etype == "error":
+                raise HTTPException(status_code=502, detail=event.get("content", ""))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"resume 失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"resume 失败: {type(e).__name__}: {e}",
+        )
+
+    resp: dict = {
+        "session_id": request.session_id,
+        "response": "".join(text_parts) or "",
+    }
+    if next_confirm is not None:
+        resp["next_confirm"] = next_confirm
+    return resp
 
 
 # WebSocket 端点
@@ -683,18 +769,32 @@ async def websocket_chat(websocket: WebSocket):
             # 接收消息
             data = await websocket.receive_text()
             images: list[str] | None = None
+            message: str = ""
+            session_id: str = ""
+            resume_flag: Optional[bool] = None
+
+            # 统一 JSON 解析：兼容 3 种 payload
+            #   1) {"message": "...", "session_id": "...", "images": [...]}   普通对话
+            #   2) {"resume": true/false, "session_id": "..."}                resume confirm
+            #   3) 纯文本                                                     当消息
             try:
                 payload = json.loads(data)
-                message = payload.get("message", "")
-                session_id = payload.get("session_id", "")
-                imgs = payload.get("images")
-                if isinstance(imgs, list) and imgs:
-                    images = [str(x) for x in imgs if x]
             except json.JSONDecodeError:
-                message = data
-                session_id = ""
+                payload = None
 
-            if not message:
+            if isinstance(payload, dict):
+                session_id = payload.get("session_id", "") or ""
+                if "resume" in payload:
+                    resume_flag = bool(payload.get("resume"))
+                else:
+                    message = payload.get("message", "") or ""
+                    imgs = payload.get("images")
+                    if isinstance(imgs, list) and imgs:
+                        images = [str(x) for x in imgs if x]
+            else:
+                message = data
+
+            if resume_flag is None and not message:
                 await websocket.send_json({"type": "error", "content": "消息为空"})
                 continue
 
@@ -709,11 +809,15 @@ async def websocket_chat(websocket: WebSocket):
                 "session_id": session_id,
             })
 
+            # 选择 stream：resume 或普通 chat
+            if resume_flag is not None:
+                stream = agent.chat_stream_resume(session_id, resume_flag)
+            else:
+                stream = agent.chat_stream(message, session_id, images=images)
+
             # 转发结构化流事件
             try:
-                async for event in agent.chat_stream(
-                    message, session_id, images=images,
-                ):
+                async for event in stream:
                     etype = event.get("type")
                     if etype == "text":
                         await websocket.send_json({
@@ -726,9 +830,15 @@ async def websocket_chat(websocket: WebSocket):
                             "name": event.get("name", "unknown"),
                         })
                     elif etype == "session":
-                        # /new 后同步会话
                         session_id = event["session_id"]
                         await websocket.send_json(event)
+                    elif etype == "confirm_required":
+                        await websocket.send_json({
+                            "type": "confirm_required",
+                            "interrupt_id": event.get("interrupt_id", ""),
+                            "payload": event.get("payload", {}),
+                            "resumable": event.get("resumable", True),
+                        })
                     elif etype == "error":
                         await websocket.send_json({
                             "type": "error",
@@ -739,7 +849,7 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_json({"type": "end"})
 
             except Exception as e:
-                logger.error(f"Agent 处理失败: {e}")
+                logger.error(f"Agent 处理失败: {e}", exc_info=True)
                 await websocket.send_json({
                     "type": "error",
                     "content": f"处理失败: {str(e)}",
@@ -748,4 +858,4 @@ async def websocket_chat(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("WebSocket 客户端断开连接")
     except Exception as e:
-        logger.error(f"WebSocket 异常: {e}")
+        logger.error(f"WebSocket 异常: {e}", exc_info=True)

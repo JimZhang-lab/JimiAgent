@@ -15,6 +15,7 @@ import math
 import pickle
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -89,6 +90,39 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+# Memory 抽取 post-filter：拦截"AI 能力 / 权限 / 沙箱"类易变事实
+# 这些内容会随工具 / safety 配置变化而过时，不应进入持久记忆
+_CAPABILITY_CLAIM_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"AI\s*(无法|不能|只能|仅能|只可|不可)(直接)?(访问|执行|读取|写入)"),
+    re.compile(r"(无法|不能|只能)直接(访问|执行|读取)"),
+    re.compile(r"AI\s*(被)?限制"),
+    re.compile(r"权限(被)?限制"),
+    re.compile(r"(系统|安全)规则.*限制"),
+    re.compile(r"(仅限|只能).*工作区"),
+    re.compile(r"工作区(目录)?.*(仅|只|无法|不能)"),
+    re.compile(r"ls\s+-la.*(粘贴|输出)"),
+    re.compile(r"粘贴(给|到).*AI"),
+    re.compile(r"拖入工作区"),
+    re.compile(r"用户(应|需|必须)(自行|在终端)"),
+    re.compile(r"用户的?工作区(路径)?是"),
+    re.compile(r"(confirm|确认流程|沙箱|白名单|黑名单)"),
+    re.compile(r"uses_workspace|has_workspace|workspace_path", re.IGNORECASE),
+)
+
+
+def _looks_like_capability_claim(text: str) -> bool:
+    """判断文本是否像"AI 能力 / 权限边界 / 沙箱策略"叙述。
+
+    MemoryStore.extract_and_store 用，确保这些易变状态不进入持久记忆。
+    """
+    if not text:
+        return False
+    for rx in _CAPABILITY_CLAIM_PATTERNS:
+        if rx.search(text):
+            return True
+    return False
+
+
 # MemoryStore
 
 class MemoryStore:
@@ -119,6 +153,9 @@ class MemoryStore:
         self._conn: Optional[sqlite3.Connection] = None
         self._embed_model = None  # LlamaIndex BaseEmbedding 或 None
         self._embed_dim: Optional[int] = None
+        # S1+P1: 写入锁（RLock 支持嵌套：add → _find_duplicate 均在同一线程内取）
+        # 同时 sqlite3.connect(check_same_thread=False) 允许跨线程使用连接
+        self._lock = threading.RLock()
 
     # 初始化
 
@@ -126,7 +163,11 @@ class MemoryStore:
         if self._conn is not None:
             return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path))
+        # S1: check_same_thread=False 允许 FastAPI threadpool / 后台线程使用同一连接
+        # 安全前提是所有写入走 self._lock
+        self._conn = sqlite3.connect(
+            str(self.db_path), check_same_thread=False,
+        )
         self._conn.row_factory = sqlite3.Row
         self._create_schema()
         if self.cfg.embedding_model != "off":
@@ -275,26 +316,27 @@ class MemoryStore:
             kind = "semantic"
 
         vec = embedding if embedding is not None else self._embed(text)
-        dup_id = self._find_duplicate(text, vec, kind, subject)
-        if dup_id is not None:
+        with self._lock:
+            dup_id = self._find_duplicate(text, vec, kind, subject)
+            if dup_id is not None:
+                now = _now_iso()
+                self._conn.execute(
+                    "UPDATE memories SET updated_at=?, hits=hits+1 WHERE id=?",
+                    (now, dup_id),
+                )
+                self._conn.commit()
+                return dup_id
+
             now = _now_iso()
-            self._conn.execute(
-                "UPDATE memories SET updated_at=?, hits=hits+1 WHERE id=?",
-                (now, dup_id),
+            blob = pickle.dumps(vec) if vec else None
+            cur = self._conn.execute(
+                "INSERT INTO memories(kind, subject, text, embedding, "
+                "created_at, updated_at, source_session, namespace) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (kind, subject, text, blob, now, now, source_session, self.namespace),
             )
             self._conn.commit()
-            return dup_id
-
-        now = _now_iso()
-        blob = pickle.dumps(vec) if vec else None
-        cur = self._conn.execute(
-            "INSERT INTO memories(kind, subject, text, embedding, "
-            "created_at, updated_at, source_session, namespace) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-            (kind, subject, text, blob, now, now, source_session, self.namespace),
-        )
-        self._conn.commit()
-        return int(cur.lastrowid)
+            return int(cur.lastrowid)
 
     def add_triple(
         self,
@@ -320,45 +362,46 @@ class MemoryStore:
         now = _now_iso()
         vf = (valid_from or now).strip()
 
-        # 检查既有活跃条目
-        existing = self._conn.execute(
-            "SELECT id, object FROM memories "
-            "WHERE namespace=? AND kind='triple' AND subject=? AND predicate=? "
-            "  AND deleted_at IS NULL AND (valid_until IS NULL OR valid_until > ?)",
-            (self.namespace, subject, predicate, now),
-        ).fetchall()
+        # S1+P1: select-then-update-then-insert 必须在同一锁内原子执行
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT id, object FROM memories "
+                "WHERE namespace=? AND kind='triple' AND subject=? AND predicate=? "
+                "  AND deleted_at IS NULL AND (valid_until IS NULL OR valid_until > ?)",
+                (self.namespace, subject, predicate, now),
+            ).fetchall()
 
-        for row in existing:
-            if (row["object"] or "") == obj:
-                # 相同事实时仅 touch
+            for row in existing:
+                if (row["object"] or "") == obj:
+                    # 相同事实 → 仅 touch
+                    self._conn.execute(
+                        "UPDATE memories SET updated_at=?, hits=hits+1 WHERE id=?",
+                        (now, int(row["id"])),
+                    )
+                    self._conn.commit()
+                    return int(row["id"])
+                # 不同 object → 把旧的 valid_until 标为 vf（过期）
                 self._conn.execute(
-                    "UPDATE memories SET updated_at=?, hits=hits+1 WHERE id=?",
-                    (now, int(row["id"])),
+                    "UPDATE memories SET valid_until=?, updated_at=? WHERE id=?",
+                    (vf, now, int(row["id"])),
                 )
-                self._conn.commit()
-                return int(row["id"])
-            # 不同 object 时让旧事实过期
-            self._conn.execute(
-                "UPDATE memories SET valid_until=?, updated_at=? WHERE id=?",
-                (vf, now, int(row["id"])),
-            )
 
-        # 插入新三元组
-        text = f"{subject} {predicate} {obj}"
-        vec = self._embed(text)
-        blob = pickle.dumps(vec) if vec else None
-        cur = self._conn.execute(
-            "INSERT INTO memories(kind, subject, text, embedding, "
-            "created_at, updated_at, source_session, namespace, "
-            "predicate, object, valid_from) "
-            "VALUES('triple', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                subject, text, blob, now, now, source_session,
-                self.namespace, predicate, obj, vf,
-            ),
-        )
-        self._conn.commit()
-        return int(cur.lastrowid)
+            # 插入新三元组（text 存 "S P O" 便于 FTS 检索）
+            text = f"{subject} {predicate} {obj}"
+            vec = self._embed(text)
+            blob = pickle.dumps(vec) if vec else None
+            cur = self._conn.execute(
+                "INSERT INTO memories(kind, subject, text, embedding, "
+                "created_at, updated_at, source_session, namespace, "
+                "predicate, object, valid_from) "
+                "VALUES('triple', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    subject, text, blob, now, now, source_session,
+                    self.namespace, predicate, obj, vf,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
 
     def triples_at(
         self,
@@ -424,13 +467,14 @@ class MemoryStore:
     def delete(self, memory_id: int) -> bool:
         assert self._conn is not None
         now = _now_iso()
-        cur = self._conn.execute(
-            "UPDATE memories SET deleted_at=? "
-            "WHERE id=? AND namespace=? AND deleted_at IS NULL",
-            (now, memory_id, self.namespace),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE memories SET deleted_at=? "
+                "WHERE id=? AND namespace=? AND deleted_at IS NULL",
+                (now, memory_id, self.namespace),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def get(self, memory_id: int) -> Optional[Memory]:
         assert self._conn is not None
@@ -578,11 +622,12 @@ class MemoryStore:
         if not ids:
             return
         assert self._conn is not None
-        self._conn.executemany(
-            "UPDATE memories SET hits=hits+1 WHERE id=?",
-            [(i,) for i in ids],
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE memories SET hits=hits+1 WHERE id=?",
+                [(i,) for i in ids],
+            )
+            self._conn.commit()
 
     def _row_to_memory(self, row) -> Memory:
         def _g(key: str, default=""):
@@ -649,7 +694,14 @@ class MemoryStore:
             "- triple（可选）：关系型事实，可表达随时间变化的属性，"
             "subject/predicate/object 都用简短英文 snake_case\n"
             "- 每条 text ≤ 80 字；总数不超过 8 条；没有价值就返回 []\n"
-            "- 只返回纯 JSON，不要 markdown fence。\n\n"
+            "- 只返回纯 JSON，不要 markdown fence。\n"
+            "\n"
+            "**严格禁止**抽以下内容（这些是易变的工具/权限状态，不是稳定事实）：\n"
+            "- AI 自身的能力边界、权限、可/不可访问的目录\n"
+            "- 工具使用规则（'AI 只能 X'、'AI 无法 Y'、'需要用户手动 Z'）\n"
+            "- 安全策略、confirm 流程、沙箱边界相关描述\n"
+            "- 'ls -la xxx 并粘贴输出' 这类临时指令\n"
+            "只关心**用户是谁、在做什么、偏好什么、发生了什么**。\n\n"
             f"对话历史：\n{history}"
         )
 
@@ -670,6 +722,7 @@ class MemoryStore:
             return 0
 
         count = 0
+        skipped = 0
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -679,13 +732,17 @@ class MemoryStore:
 
             try:
                 if kind == "triple":
-                    s = str(item.get("subject", "user")).strip()
-                    p = str(item.get("predicate", "")).strip()
-                    o = str(item.get("object", "")).strip()
-                    if not (s and p and o):
+                    s_ = str(item.get("subject", "user")).strip()
+                    p_ = str(item.get("predicate", "")).strip()
+                    o_ = str(item.get("object", "")).strip()
+                    if not (s_ and p_ and o_):
+                        continue
+                    # post-filter：triple 形式的 AI 能力描述也要拦
+                    if _looks_like_capability_claim(f"{s_} {p_} {o_}"):
+                        skipped += 1
                         continue
                     self.add_triple(
-                        subject=s, predicate=p, obj=o,
+                        subject=s_, predicate=p_, obj=o_,
                         source_session=session_id,
                     )
                     count += 1
@@ -694,12 +751,23 @@ class MemoryStore:
                 t = str(item.get("text", "")).strip()
                 if not t:
                     continue
+                # post-filter：LLM 偶尔仍会冒出"AI 无法..."类幻觉事实 → 双重拦截
+                if _looks_like_capability_claim(t):
+                    skipped += 1
+                    continue
                 self.add(text=t, kind=kind, source_session=session_id)
                 count += 1
             except Exception as e:
                 logger.debug(f"记忆入库失败（跳过）: {e}")
+
+        # 后台 hot_extract 在 TUI 下会打断用户正输入；改 debug 避免撕屏。
+        # 要看统计用 `/memories` 命令或调高 log level 到 DEBUG。
+        if skipped:
+            logger.debug(
+                f"MemoryStore: 抽取时过滤掉 {skipped} 条「AI 能力边界」幻觉事实"
+            )
         if count:
-            logger.info(f"MemoryStore: 从 session={session_id} 抽入 {count} 条记忆")
+            logger.debug(f"MemoryStore: 从 session={session_id} 抽入 {count} 条记忆")
         return count
 
     # 注入辅助

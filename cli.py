@@ -68,15 +68,61 @@ def start(host, port, verbose):
 
 @cli.command()
 @click.option("--session", "-s", default=None, help="恢复指定会话 ID")
-def chat(session):
-    """终端交互式对话（基于 prompt_toolkit + rich.live 的 TUI）"""
+@click.option(
+    "--classic",
+    is_flag=True,
+    hidden=True,
+    help="使用旧版 rich.live TUI（临时保留，下一版本移除）",
+)
+def chat(session, classic):
+    """终端交互式对话（React + Ink TUI；--classic 使用旧版）"""
     from server.config.settings import get_settings
     from server.config.logging_setup import setup_from_settings
-    from server.core.tui import run_chat
 
-    # CLI 入口也初始化 logging
-    setup_from_settings(get_settings())
-    asyncio.run(run_chat(session))
+    if classic:
+        # 临时 fallback；下一版本删除
+        from server.core.tui import run_chat
+        setup_from_settings(get_settings())
+        asyncio.run(run_chat(session))
+        return
+
+    # 新 React/Ink TUI：spawn Node 子进程接管 TTY
+    import shutil
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parent
+    cli_js = project_root / "tui" / "dist" / "cli.js"
+    node = shutil.which("node")
+
+    if node is None:
+        console.print(
+            "[red]未找到 Node.js[/red]。新 TUI 需要 Node 20+。\n"
+            "[dim]安装 Node 后再试，或临时使用 `python cli.py chat --classic` 走旧版。[/dim]"
+        )
+        raise SystemExit(1)
+
+    if not cli_js.exists():
+        console.print(
+            "[red]未找到 tui/dist/cli.js[/red]。请先构建：\n"
+            "  [cyan]yarn --cwd tui install && yarn --cwd tui build[/cyan]\n"
+            "[dim]或临时使用 `python cli.py chat --classic` 走旧版。[/dim]"
+        )
+        raise SystemExit(1)
+
+    env = dict(os.environ)
+    if session:
+        env["JIMI_TUI_SESSION"] = session
+    # 确保 worker 能找到 server/ 包
+    env["PYTHONPATH"] = (
+        str(project_root)
+        + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    )
+    # 关键：用当前解释器（例如 conda env 下的 python），而不是 Node 端 PATH 里的第一个 python
+    if not env.get("JIMI_TUI_WORKER_CMD"):
+        env["JIMI_TUI_WORKER_CMD"] = f"{sys.executable} -m server.core.tui_worker"
+
+    # execvp：让 Node 接管 TTY 与信号；当前 Python 进程被替换
+    os.execvpe(node, [node, str(cli_js)], env)
 
 
 def _print_status(agent):
@@ -549,9 +595,18 @@ def message_stream(text, session_id):
 @click.option("--yaml-file", default="config/agent_config.yaml", help="yaml 配置路径")
 @click.option("--dry-run", is_flag=True, help="只打印将要写入的改动，不实际写文件")
 def migrate_env(env_file, yaml_file, dry_run):
-    """一次性迁移 .env 中的 API Key 到 yaml（随后可删除 .env）"""
+    """[DEPRECATED] 一次性迁移 .env 中的 API Key 到 yaml。
+
+    项目已不再读取 `.env` 文件 —— 配置请直接写在 yaml，或用 `JIMI_*`
+    进程环境变量覆盖。本命令仅为历史用户从 .env 迁移用，将在未来版本移除。
+    """
     import re
     from pathlib import Path
+
+    console.print(
+        "[yellow]⚠ migrate-env 已废弃：项目不再读取 .env；"
+        "本命令仅用于历史迁移，将在未来版本移除。[/yellow]"
+    )
 
     env_path = Path(env_file)
     yaml_path = Path(yaml_file)

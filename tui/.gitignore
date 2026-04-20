@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.yarn-error.log
+yarn-error.log
+*.tsbuildinfo
+.vitest-cache/
+coverage/
+.DS_Store
