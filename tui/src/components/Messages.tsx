@@ -1,53 +1,29 @@
 import React from "react";
-import { Box, Static, Text } from "ink";
+import { Box, Text } from "ink";
 import { useStore } from "../state/store.js";
 import { resolveTheme } from "../themes/index.js";
 import { MessageItem } from "./MessageItem.js";
 
 /**
- * 消息列表容器 —— **print-above** 架构。
+ * print-above 架构里的动态层。
  *
- * 目的：不再在 TUI 内部做虚拟滚动窗口，把历史消息一条条"打印"到终端 stdout，
- * 让终端自身的 scrollback 成为事实上的历史视图（用户鼠标滚轮 / PgUp 即看完整历史）。
- *
- * 实现：
- *   - 稳定消息（非流式）走 `<Static>`：Ink 只在追加时渲染新增项，打印后脱离重绘区，
- *     留在 terminal scrollback 里不会被覆盖
- *   - 正在流式中的消息走普通 `<Box>`：每个 chunk 触发 rerender，位置在固定动态区
- *   - 一旦流式完成（streaming=false），该消息从 pending 区"升华"到 Static items，
- *     Ink diff 发现 items 纯追加，打印到 scrollback，完成一次状态迁移
- *
- * **前置条件**：Ink 5 **不**进入 alt-screen（默认即不进）。若将来引入
- * `fullscreen` 模式，这套架构会失效。
- *
- * 空消息态渲染 Splash（连接状态 + 帮助提示），等待第一条消息出现后
- * Splash 被 Ink 擦除并被 Static 接管。
+ * 历史消息交给 `HistoryStatic`，这里只渲染 Splash 和流式中的尾部消息。
  */
 export function Messages(): React.ReactElement {
   const messages = useStore((s) => s.messages);
   const connected = useStore((s) => s.connected);
 
+  // 从尾部向前找连续的 streaming 消息，作为 pending 区。
+  let stableEnd = messages.length;
+  while (stableEnd > 0 && messages[stableEnd - 1]?.streaming) stableEnd--;
+  const pending = messages.slice(stableEnd);
+
   if (messages.length === 0) {
     return <SplashScreen connected={connected} />;
   }
 
-  // 把 messages 切成 [stable 前缀, pending 尾部]：
-  //   - pending 尾部：从末尾向前找连续的 streaming 消息
-  //   - stable：剩余前缀，作为 Static items
-  // 保证 Static items 永远是"上次的 items + 尾部新增"的纯追加序列，
-  // Ink Static 才能识别并只打印新项。
-  let stableEnd = messages.length;
-  while (stableEnd > 0 && messages[stableEnd - 1]?.streaming) stableEnd--;
-  const stable = messages.slice(0, stableEnd);
-  const pending = messages.slice(stableEnd);
-
   return (
     <Box flexDirection="column" paddingX={1}>
-      {stable.length > 0 && (
-        <Static items={stable}>
-          {(m) => <MessageItem key={m.id} message={m} />}
-        </Static>
-      )}
       {pending.map((m) => (
         <MessageItem key={m.id} message={m} />
       ))}
@@ -55,17 +31,7 @@ export function Messages(): React.ReactElement {
   );
 }
 
-/**
- * 空消息态的"开场画面"。
- *
- * 展示内容：
- *   - ASCII logo / 欢迎语
- *   - 当前会话 / 工作目录 / 模型等上下文，帮助用户确认"自己在哪"
- *   - 常用快捷键三条，避免第一次进来完全不知道怎么开始
- *
- * print-above 架构下：Splash 位于动态区，用户发第一条消息时会被 Ink 自动擦除，
- * 不会滞留在 scrollback 里造成噪声。
- */
+/** 空消息态的开场画面。 */
 function SplashScreen({
   connected,
 }: {

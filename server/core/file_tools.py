@@ -3,17 +3,10 @@ Author: JimZhang
 LastEditors: Cascade
 LastEditTime: 2026-04-21
 FilePath: /JimiAgent/server/core/file_tools.py
-Description: 全盘文件与 Shell 内置工具。
+Description: 文件与 Shell 工具。
 
-安全架构：
-- `settings.safety.enabled=True`（默认）：走 `safety_fs` 分类
-    - safe    → 直接执行
-    - confirm → 依 `confirm_mode` 处理：
-        * "llm"  → 返回 `[PENDING CONFIRM]`，等 LLM 询问用户后再带 `confirm=True` 重试
-        * "ui"   → 调 LangGraph `interrupt(...)` 暂停 graph，前端/TUI 弹框（Stage 2）
-        * "auto" → ui 可用则 ui，否则退化 llm
-    - deny    → 硬拒，不允许 confirm
-- `settings.safety.enabled=False`：兼容老行为（workspace-only 白名单）
+安全模式：`safe` 直接执行，`confirm` 走确认流程，`deny` 直接拒绝。
+关闭 `settings.safety.enabled` 时回退旧的 workspace-only 行为。
 '''
 import logging
 import os
@@ -35,7 +28,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 旧危险 token 常量，skill_exec.py 仍 import
+# 旧危险 token 常量，skill_exec.py 仍会复用
 _DANGEROUS_PATTERNS = (
     "rm -rf /",
     "rm -rf /*",
@@ -46,7 +39,7 @@ _DANGEROUS_PATTERNS = (
     "dd if=",
     "> /dev/sda",
     "chmod -R 777 /",
-    # shell 注入/组合字符
+    # shell 组合字符
     ";",
     "&&",
     "||",
@@ -59,7 +52,7 @@ _DANGEROUS_PATTERNS = (
 )
 
 
-# ================ helpers ================
+# helpers
 
 def _safety_cfg(agent: "JimiAgent"):
     return getattr(agent.settings, "safety", None)
@@ -71,7 +64,7 @@ def _confirm_mode(agent: "JimiAgent") -> str:
     if cfg is None:
         return "llm"
     mode = (cfg.confirm_mode or "auto").lower()
-    # "auto" 默认走 ui（LangGraph interrupt）；不处理方需用 agent.resume() 恢复
+    # auto 默认走 ui interrupt
     if mode == "auto":
         return "ui"
     if mode not in ("off", "ui", "llm"):
@@ -80,18 +73,11 @@ def _confirm_mode(agent: "JimiAgent") -> str:
 
 
 def _ui_interrupt_confirm(payload: dict) -> bool:
-    """调用 LangGraph interrupt 暂停 graph，等 UI 层 resume。
-
-    resume value 约定：
-    - True / "approve" / "yes" → 批准
-    - 其它 → 拒绝
-    只能在 graph 执行上下文（tool 内部）调用；
-    外部直接调会 RuntimeError。
-    """
+    """调用 LangGraph interrupt，等待 UI resume。"""
     try:
         from langgraph.types import interrupt
     except ImportError:
-        # langgraph 版本过低，退化为拒绝
+        # 旧版 langgraph 没有 interrupt 时直接拒绝
         logger.warning("langgraph.types.interrupt 不可用，视为拒绝")
         return False
     resp = interrupt(payload)
@@ -109,12 +95,7 @@ def _workspace(agent: "JimiAgent") -> Path:
 
 
 def user_cwd() -> Path:
-    """返回用户启动 `jimi chat` 时的 cwd（由 cli.py 透传 JIMI_USER_CWD）。
-
-    若环境变量缺失（例如通过 `python cli.py start` 跑 gateway 或测试），
-    则回退到进程 os.getcwd()。对 TUI 下的 `list_dir(".")` 与"当前目录"
-    语义至关重要——否则 LLM 会把 workspace 误当作用户 CWD。
-    """
+    """返回用户启动 `jimi chat` 时的 cwd。"""
     env = os.environ.get("JIMI_USER_CWD")
     if env:
         p = Path(env)
@@ -139,10 +120,7 @@ def _extra_safe_heads(agent: "JimiAgent") -> list[str]:
 
 
 def _pending_confirm_message(summary: str, retry_hint: str) -> str:
-    """返回给 LLM 的「需确认」提示。
-
-    LLM 应把 summary 告诉用户、得到同意后带 confirm=True 重试。
-    """
+    """生成给 LLM 的待确认提示。"""
     return (
         f"[PENDING CONFIRM] {summary}\n"
         f"请把以上操作告知用户，等用户同意后使用相同参数并附加 `confirm=true` 重试。\n"
@@ -151,10 +129,10 @@ def _pending_confirm_message(summary: str, retry_hint: str) -> str:
     )
 
 
-# ================ legacy fallback（safety disabled） ================
+# legacy fallback
 
 def _resolve_roots_legacy(agent: "JimiAgent") -> list[Path]:
-    """safety 关闭时的 allowed roots（仅 workspace + extra）"""
+    """safety 关闭时的白名单根目录。"""
     roots = [_workspace(agent)]
     extra = getattr(agent.settings, "_file_tools_roots", None)
     if extra:
@@ -168,7 +146,7 @@ def _resolve_roots_legacy(agent: "JimiAgent") -> list[Path]:
 
 
 def _safe_resolve_legacy(path_str: str, roots: list[Path]) -> Path:
-    """safety 关闭时的白名单校验（老逻辑）"""
+    """safety 关闭时的路径白名单校验。"""
     p = Path(path_str).expanduser().resolve()
     for root in roots:
         try:
@@ -182,7 +160,7 @@ def _safe_resolve_legacy(path_str: str, roots: list[Path]) -> Path:
     )
 
 
-# ================ 新架构：统一 resolve + 安全判定 ================
+# 新安全判定
 
 def _check_path_read(agent: "JimiAgent", path_str: str) -> tuple[bool, str, Optional[Path]]:
     """读路径检查。返回 (allowed, err_message, resolved_path)。"""
@@ -204,13 +182,7 @@ def _check_path_read(agent: "JimiAgent", path_str: str) -> tuple[bool, str, Opti
 def _check_path_write(
     agent: "JimiAgent", path_str: str, confirm: bool,
 ) -> tuple[str, str, Optional[Path]]:
-    """写路径检查。返回 (status, message, resolved_path)。
-
-    status:
-      - "allow"  → 允许直接执行
-      - "deny"   → 硬拒；message 为原因
-      - "pending"→ 需 confirm；message 为给 LLM 的 PENDING 提示
-    """
+    """写路径检查。返回 (status, message, resolved_path)。"""
     cfg = _safety_cfg(agent)
     if cfg is None or not cfg.enabled:
         # legacy
@@ -221,7 +193,7 @@ def _check_path_write(
             return "deny", str(e), None
 
     if _confirm_mode(agent) == "off":
-        # 仅硬拒黑名单
+        # 仅保留硬拒黑名单
         denied, reason = is_path_denied(path_str, _extra_path_deny(agent))
         if denied:
             return "deny", f"[REJECTED] {reason}", None
@@ -237,7 +209,7 @@ def _check_path_write(
         return "deny", f"[REJECTED] {v.reason}", None
     if v.is_allow:
         return "allow", "", resolved
-    # confirm required
+    # 其余写入走 confirm
     if confirm:
         return "allow", "", resolved
     return "pending", v.summary or f"写入 {resolved}", resolved
@@ -247,11 +219,11 @@ def _check_command(agent: "JimiAgent", command: str, confirm: bool) -> tuple[str
     """命令检查。返回 (status, message)。status 同 _check_path_write。"""
     cfg = _safety_cfg(agent)
     if cfg is None or not cfg.enabled:
-        # legacy：只在 bash.enabled 路径里用，这里不会被调
+        # legacy：这里只会在 bash.enabled 路径外出现
         return "allow", ""
 
     if _confirm_mode(agent) == "off":
-        # 仅硬拒黑名单
+        # 仅保留硬拒黑名单
         from server.core.safety_fs import COMMAND_DENY_PATTERNS
         import re
         for pat in COMMAND_DENY_PATTERNS:
@@ -276,10 +248,10 @@ def _check_command(agent: "JimiAgent", command: str, confirm: bool) -> tuple[str
     return "pending", v.summary or f"执行命令: {command}"
 
 
-# ================ 文件工具 ================
+# 文件工具
 
 def build_file_tools(agent: "JimiAgent") -> list[StructuredTool]:
-    """构建文件操作工具集（全盘 + 安全层）"""
+    """构建文件工具。"""
 
     def read_file(path: str, offset: int = 0, limit: int = 200) -> str:
         """读取指定文件的内容（文本文件）。

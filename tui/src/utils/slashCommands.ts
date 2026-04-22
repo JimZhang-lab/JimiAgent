@@ -8,9 +8,9 @@ import type { ThemeName } from "../themes/index.js";
 import { groupByScope } from "../keybindings/registry.js";
 
 /**
- * 客户端斜杠命令定义。区别于服务端 commands（/vim、/summary 等交给 agent 处理）。
+ * 客户端斜杠命令。
  *
- * 客户端命令只改动 Node 端 UI 状态，不发送给 Python。
+ * 只改 Node 端 UI 状态，不发送给 Python。
  */
 export interface SlashCommandCtx {
   exit: () => void;
@@ -44,7 +44,7 @@ export const CLIENT_COMMANDS: ClientSlashCommand[] = [
     name: "/help",
     description: "显示帮助",
     run: () => {
-      // 快捷键段由 keybindings registry 实时投影，保证文档与实际绑定同步。
+      // 快捷键段实时取自 keybindings registry，保证文档和实际绑定一致。
       const grouped = groupByScope();
       const globalKeys = grouped.global ?? [];
       const selectionKeys = grouped.selection ?? [];
@@ -136,8 +136,7 @@ export const CLIENT_COMMANDS: ClientSlashCommand[] = [
         });
         return;
       }
-      // 流式中的消息带 streaming 标记，复制会拿到截断内容。
-      // 明确告诉用户现在复制的是不完整版本，让其决定要不要等生成完。
+      // 流式中的消息可能还是截断版，提示用户自行决定是否等等。
       const partialHint = last.streaming || state.streaming
         ? "（⚠ 当前仍在流式生成，复制为不完整内容）"
         : "";
@@ -178,7 +177,7 @@ export const CLIENT_COMMANDS: ClientSlashCommand[] = [
         return;
       }
       const rawN = arg.trim();
-      // 无参数：URL 只有一个时直接打开；多个时先列出让用户选
+      // 无参数时：只有一个 URL 就直接打开；多个先列出来让用户选
       if (rawN === "") {
         if (urls.length > 1) {
           const listing = urls
@@ -193,7 +192,7 @@ export const CLIENT_COMMANDS: ClientSlashCommand[] = [
           });
           return;
         }
-        // 只有 1 个 → 打开
+        // 只有 1 个时直接打开
       }
       const n = rawN === "" ? 1 : Number(rawN);
       if (!Number.isInteger(n) || n < 1 || n > urls.length) {

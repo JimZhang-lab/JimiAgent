@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/server/core/agent.py
-Description: Agent 核心引擎。
+Description: Agent 引擎。
 
 '''
 import logging
@@ -23,6 +23,41 @@ from server.core.session import SessionManager
 from server.core.commands import CommandDispatcher, CommandResult, think_prompt_for
 
 logger = logging.getLogger(__name__)
+
+
+def _stringify_tool_output(out: object) -> str:
+    """把工具返回值压成前端可展示的字符串。"""
+    if out is None:
+        return ""
+    # ToolMessage / AIMessage 等对象优先取 content
+    content = getattr(out, "content", None)
+    if content is not None:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, (list, tuple)):
+            # ContentBlock 只做文本拼接
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    parts.append(part.get("text") or str(part))
+                else:
+                    parts.append(str(part))
+            return "".join(parts)
+        return str(content)
+    if isinstance(out, str):
+        return out
+    if isinstance(out, bytes):
+        try:
+            return out.decode("utf-8", errors="replace")
+        except Exception:
+            return str(out)
+    try:
+        import json as _json
+        return _json.dumps(out, ensure_ascii=False, indent=2)
+    except Exception:
+        return str(out)
 
 
 def _build_datetime_tool() -> StructuredTool:
@@ -60,7 +95,7 @@ def _build_session_tools(agent: "JimiAgent") -> list[StructuredTool]:
         """获取指定会话的元信息：标题、消息数、创建/更新时间、think/verbose 配置。"""
         sess = agent.session_mgr.get_session(session_id)
         if sess is None:
-            # 支持 8 位前缀匹配
+            # 支持 8 位前缀
             for s in agent.session_mgr.list_sessions():
                 if s.id.startswith(session_id):
                     sess = s
@@ -100,7 +135,7 @@ def _build_session_tools(agent: "JimiAgent") -> list[StructuredTool]:
         import asyncio as _aio
         try:
             _aio.get_running_loop()
-            # 当前线程已有 loop，改用新 loop
+            # 当前线程已有 loop 时改用新 loop
             new_loop = _aio.new_event_loop()
             try:
                 return new_loop.run_until_complete(coro)
@@ -328,27 +363,12 @@ def _build_memory_tools(agent: "JimiAgent") -> list[StructuredTool]:
 
 
 class JimiAgent:
-    """
-    JimiAgent 核心引擎
-
-    整合所有组件:
-    - Workspace: system prompt 组装
-    - SkillRetriever: LlamaIndex 语义召回 Skills → LangChain Tools
-    - MemoryManager: SQLite 持久化记忆
-    - SessionManager: 多会话管理
-    - LangGraph ReAct Agent: 推理+行动循环
-
-    生命周期：
-        agent = JimiAgent(settings)
-        await agent.ainitialize()   # 异步初始化（Memory + Skills）
-        ... 调用 chat / chat_stream ...
-        await agent.aclose()        # 关闭资源
-    """
+    """整合 prompt、skills、memory、sessions 与 LangGraph 的主引擎。"""
 
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
 
-        # 初始化组件
+        # 基础组件
         self.workspace = Workspace()
         self.memory = MemoryManager(self.settings.memory_abs_path)
         self.session_mgr = SessionManager(
@@ -377,7 +397,7 @@ class JimiAgent:
         # VLM 未配置时复用主 LLM
         self.vlm = self._create_vlm()
 
-        # 长期记忆，支持插件槽位替换
+        # 长期记忆，可被插件槽位替换
         from server.core.memory_store import MemoryStore
         from server.core.plugin_slots import resolve_memory_slot
         self.memory_store = None
@@ -620,11 +640,7 @@ class JimiAgent:
         return self.settings.session.default_think_level
 
     def _build_system_prompt(self, think_level: str) -> str:
-        """Workspace 基础 prompt + 运行时环境 + think level 追加段。
-
-        运行时环境段的存在是为了让 LLM 正确区分 "用户 CWD" 与 "workspace"：
-        没有这段提示时 LLM 会把两者混为一谈，甚至凭直觉选 ~/Desktop。
-        """
+        """构造基础 prompt，并补上运行时环境与 think level。"""
         from server.core.file_tools import user_cwd  # 延迟 import 避免循环
 
         base = self.workspace.build_system_prompt()
@@ -667,7 +683,7 @@ class JimiAgent:
             except Exception as e:
                 logger.debug(f"memory 注入跳过: {e}")
 
-        # 有图时切换到 multi-part content
+        # 有图时改用 multi-part content
         if images:
             parts: list[dict] = []
             if user_message:
@@ -681,14 +697,10 @@ class JimiAgent:
             msgs.append(HumanMessage(content=user_message))
         return {"messages": msgs}
 
-    # J3 per-turn 抽取
+    # per-turn 抽取
 
     def _get_extract_lock(self, session_id: str):
-        """懒加载每个 session 的抽取锁。
-
-        S3：用 WeakValueDictionary —— 抽取完成且无引用时锁自动回收，
-        避免长期运行时 `_extract_locks` 按 session_id 无限堆积泄漏。
-        """
+        """懒加载每个 session 的抽取锁。"""
         import asyncio as _aio
         import weakref
         locks = getattr(self, "_extract_locks", None)
@@ -710,7 +722,7 @@ class JimiAgent:
             return
         lock = self._get_extract_lock(session_id)
         if lock.locked():
-            # 已有任务在跑时直接跳过
+            # 同一会话已有抽取任务时直接跳过
             return
         timeout = max(1, int(self.settings.memory.extract_timeout_seconds or 10))
         messages = [_Hm(content=user_msg), _Am(content=ai_msg)]
@@ -763,12 +775,7 @@ class JimiAgent:
         *,
         use_vlm: bool = False,
     ):
-        """
-        构建（或复用）LangGraph ReAct Agent
-
-        缓存 key = (sorted tool names, think_level, "vlm" or "llm")
-        相同 key 复用已编译的 graph。use_vlm=True 时走 self.vlm，否则 self.llm。
-        """
+        """构建或复用 LangGraph ReAct Agent。"""
         from langgraph.prebuilt import create_react_agent
 
         cache_key = (
@@ -806,7 +813,7 @@ class JimiAgent:
 
         all_tools = self._builtin_tools + retrieved_tools
 
-        # 去重（按 tool name）
+        # 按 tool name 去重
         seen = set()
         unique_tools = []
         for t in all_tools:
@@ -823,30 +830,19 @@ class JimiAgent:
         *,
         images: list[str] | None = None,
     ) -> tuple[str, str]:
-        """
-        处理用户消息并返回完整响应。
-
-        Args:
-            message: 用户消息
-            session_id: 当前会话 ID
-            images: 可选图片 URL / data:URI 列表；非空时走 VLM
-
-        Returns:
-            (response_text, effective_session_id)
-            — effective_session_id 可能因 /new 命令发生变化
-        """
+        """处理用户消息并返回完整响应。"""
         await self._ensure_initialized()
 
-        # 1. 前置：斜杠命令拦截
+        # 1. 斜杠命令
         cmd_res = await self.commands.try_handle(message, session_id)
         if cmd_res.handled:
             return cmd_res.response, (cmd_res.new_session_id or session_id)
 
-        # 2. activation 策略检查
+        # 2. activation
         if not self._check_activation(message, session_id):
             return "", session_id
 
-        # 3. 自动 compact（阈值检查，失败不抛）
+        # 3. 自动 compact
         await self._maybe_auto_compact(session_id)
 
         # 4. 常规 Agent 调用
@@ -860,7 +856,7 @@ class JimiAgent:
 
         result = await agent.ainvoke(input_messages, config=config)
 
-        # 先检测是否卡在 interrupt —— 非流式场景无法双向交互，返回提示
+        # 非流式接口无法继续确认时，直接返回提示
         paused = await self._check_interrupts(agent, config)
         if paused:
             first = paused[0]
@@ -893,23 +889,10 @@ class JimiAgent:
         *,
         images: list[str] | None = None,
     ) -> AsyncGenerator[dict, None]:
-        """
-        流式处理用户消息
-
-        Args:
-            message: 用户消息
-            session_id: 会话 ID
-
-        Yields:
-            事件字典:
-                {"type": "session", "session_id": "xxx"}  — 若命令切换了会话
-                {"type": "text", "content": "..."}        — 文本片段
-                {"type": "tool", "name": "..."}           — 工具调用开始
-                {"type": "error", "content": "..."}       — 错误
-        """
+        """流式处理用户消息。"""
         await self._ensure_initialized()
 
-        # 1. 前置：斜杠命令拦截
+        # 1. 斜杠命令
         cmd_res = await self.commands.try_handle(message, session_id)
         if cmd_res.handled:
             if cmd_res.new_session_id:
@@ -917,14 +900,14 @@ class JimiAgent:
             yield {"type": "text", "content": cmd_res.response}
             return
 
-        # 2. activation 检查
+        # 2. activation
         if not self._check_activation(message, session_id):
             return
 
-        # 3. 自动 compact（阈值检查）
+        # 3. 自动 compact
         await self._maybe_auto_compact(session_id)
 
-        # 4. 常规 Agent 流式调用
+        # 4. 常规流式调用
         think_level = self._get_think_level(session_id)
         tools = self._get_tools_for_query(message)
         use_vlm = bool(images)
@@ -952,12 +935,12 @@ class JimiAgent:
             yield {"type": "error", "content": f"{type(e).__name__}: {e}"}
             return
 
-        # 检查是否卡在 interrupt（dangerous 操作等待用户 confirm）
+        # 若卡在 interrupt，则把确认需求继续透给前端
         paused = await self._check_interrupts(agent, config)
         if paused:
             for pay in paused:
                 yield {"type": "confirm_required", **pay}
-            # 流暂停；等外部调 chat_stream_resume 继续
+            # 流暂停，等外部调 chat_stream_resume
             return
 
         if not has_content:
@@ -1012,10 +995,20 @@ class JimiAgent:
                 yield {"type": "tool", "name": tool_name}
 
             elif kind == "on_tool_end":
+                tool_name = event.get("name", "unknown")
                 self._log_tool_call(
-                    event.get("name", "unknown"), "ok",
+                    tool_name, "ok",
                     session_id=session_id,
                 )
+                # 把工具结果统一压成字符串再透给前端
+                out = event.get("data", {}).get("output")
+                out_str = _stringify_tool_output(out)
+                if out_str:
+                    yield {
+                        "type": "tool_result",
+                        "name": tool_name,
+                        "output": out_str,
+                    }
 
             elif kind == "on_tool_error":
                 tool_name = event.get("name", "unknown")
@@ -1025,13 +1018,15 @@ class JimiAgent:
                     error=str(err) if err else "",
                     session_id=session_id,
                 )
+                # 错误也通过 tool_result 透给前端
+                yield {
+                    "type": "tool_result",
+                    "name": tool_name,
+                    "output": f"[error] {err}" if err else "[error] 工具执行失败",
+                }
 
     async def _check_interrupts(self, agent, config: dict) -> list[dict]:
-        """读 graph 当前 state 的 interrupts。
-
-        返回每条 interrupt 对应的结构化 payload：
-          {"interrupt_id": "...", "payload": {...原始 interrupt.value...}}
-        """
+        """读取 graph 当前 state 的 interrupts。"""
         try:
             state = await agent.aget_state(config)
         except Exception as e:
@@ -1063,7 +1058,7 @@ class JimiAgent:
         from langgraph.types import Command
         await self._ensure_initialized()
 
-        # resume 时不知道当轮 query，用全量 tools 保证 graph 结构完整
+        # resume 时没有原始 query，只能用全量 tools 保证 graph 结构完整
         think_level = self._get_think_level(session_id)
         tools = list(self._builtin_tools)
         try:
@@ -1096,7 +1091,7 @@ class JimiAgent:
             yield {"type": "error", "content": f"{type(e).__name__}: {e}"}
             return
 
-        # resume 后可能还有后续 interrupt（tool 在下一次 call 又 dangerous）
+        # resume 后可能再次遇到 interrupt
         paused = await self._check_interrupts(agent, config)
         if paused:
             for pay in paused:
@@ -1106,18 +1101,13 @@ class JimiAgent:
         if ai_chunks:
             self._schedule_hot_extract(session_id, "", "".join(ai_chunks))
 
-    # ===== 会话清空 / 压缩 =====
+    # 会话清空 / 压缩
 
     async def clear_session_history(self, session_id: str) -> bool:
-        """
-        清空某 session 的 Agent 对话历史（Checkpointer 中的 thread）
-
-        通过覆写当前 thread 的最新 checkpoint 为空消息列表实现。
-        返回是否操作成功。
-        """
+        """清空某个 session 在 checkpointer 里的对话历史。"""
         checkpointer = self.memory.get_checkpointer()
         try:
-            # LangGraph 的 checkpointer 支持 delete_thread (>= 0.2.x)
+            # 新版 LangGraph 支持 delete_thread
             if hasattr(checkpointer, "adelete_thread"):
                 await checkpointer.adelete_thread(session_id)
                 return True
@@ -1133,22 +1123,7 @@ class JimiAgent:
         session_id: str,
         keep_recent: int = 6,
     ) -> str:
-        """
-        压缩当前会话的上下文
-
-        工作流程：
-        1. 读取 thread 的消息列表
-        2. 保留最新 `keep_recent` 条，旧消息通过 LLM 浓缩为摘要
-        3. 用 RemoveMessage 删除旧消息 + 注入 SystemMessage 形式的摘要
-        4. 用 aupdate_state 把新 state 写回 checkpointer
-
-        Args:
-            session_id: 会话 ID
-            keep_recent: 保留末尾几条消息
-
-        Returns:
-            摘要文本（若 messages 过短则返回占位说明）
-        """
+        """把旧消息浓缩成摘要，只保留最近 `keep_recent` 条原文。"""
         from langchain_core.messages import SystemMessage
         from langchain_core.messages.modifier import RemoveMessage
 
@@ -1165,7 +1140,7 @@ class JimiAgent:
 
         to_summarize = messages[:-keep_recent]
 
-        # 拼接历史，做摘要
+        # 拼接历史做摘要
         def _msg_line(m) -> str:
             role = getattr(m, "type", "msg")
             content = getattr(m, "content", "")
@@ -1194,10 +1169,7 @@ class JimiAgent:
             logger.warning(f"LLM 摘要失败: {e}，放弃 compact")
             return f"(摘要失败: {e})"
 
-        # 构造 state 更新：
-        # 1) 删除全部现有消息（包括 kept_recent），避免 summary 被追加到尾部
-        # 2) 按 [summary, *kept_recent_copies] 顺序重新写入
-        # 这样 system 摘要在前，近期消息在后，与人类阅读顺序一致
+        # 先删旧消息，再按 [summary, *kept_recent_copies] 重写，保证摘要在前。
         kept_recent = messages[-keep_recent:] if keep_recent > 0 else []
         all_removes = [
             RemoveMessage(id=m.id) for m in messages if getattr(m, "id", None)
@@ -1206,10 +1178,9 @@ class JimiAgent:
             content=f"[先前对话摘要] {summary_text.strip()}"
         )
 
-        # kept_recent 消息需要"复制"为没有 id 的新实例，否则会被 RemoveMessage 同步移除
-        # （注意：LangGraph 的 add_messages 按 id 去重/替换）
+        # kept_recent 要复制成无 id 的新消息，避免被 RemoveMessage 一起删掉。
         def _clone_without_id(m):
-            # 使用 model_copy 生成新实例，清除 id 让其被当作"新消息"重新追加
+            # 清掉 id，让 LangGraph 把它当新消息重新追加
             clone = m.model_copy()
             try:
                 clone.id = None
@@ -1220,7 +1191,7 @@ class JimiAgent:
         new_kept = [_clone_without_id(m) for m in kept_recent]
         replacement = all_removes + [summary_message] + new_kept
 
-        # aupdate_state 在多节点 graph 中需指定 as_node；固定用入口节点避免 Ambiguous
+        # 多节点 graph 下优先指定 as_node，避免 Ambiguous
         try:
             await graph.aupdate_state(
                 config,
@@ -1239,8 +1210,7 @@ class JimiAgent:
             f"Session {session_id} 已压缩：{len(to_summarize)} 条旧消息 → 1 条摘要"
         )
 
-        # 背景路径：compact 成功后顺手抽取一次长期记忆（失败不影响 compact 结果）
-        # extract_mode="off" 时完全跳过；"on_compact" 和 "per_turn" 都会在 compact 时抽一批
+        # compact 成功后顺手抽一批长期记忆；失败不影响 compact 结果。
         if (
             self.memory_store is not None
             and self.settings.memory.extract_on_compact
@@ -1311,7 +1281,7 @@ class JimiAgent:
         self._initialized = True
         self._log_status()
 
-    # 保留同步 initialize 作为别名（仅初始化非 async 部分，供 CLI doctor/status 使用）
+    # 同步 initialize 仅供 CLI doctor/status 等轻量场景使用。
     def initialize(self):
         """仅初始化同步资源（Skills + 默认会话）；异步依赖请用 ainitialize。"""
         if self._initialized:
@@ -1325,17 +1295,16 @@ class JimiAgent:
         self._log_status()
 
     async def aclose(self):
-        """关闭资源：cancel 后台 hot_extract → 关 Memory → 关 MemoryStore → 清 cache"""
-        # 1) cancel 挂起的 hot_extract tasks（避免"Task was destroyed but pending"）
+        """关闭资源：停 hot_extract、关 Memory/MemoryStore、清 cache。"""
+        # 1) cancel 挂起的 hot_extract tasks，避免 pending task 警告
         tasks = getattr(self, "_hot_tasks", None)
         if tasks:
             import asyncio as _aio
-            # 先 snapshot 再 cancel —— add_done_callback(discard) 会在 await 期间
-            # 修改 tasks set，不能直接对它 wait
+            # 先 snapshot 再 cancel，避免等待时集合被回调修改
             snapshot = [t for t in tasks if not t.done()]
             for t in snapshot:
                 t.cancel()
-            # 最多等 2s；未完成的由 loop 自行清理
+            # 最多等 2s；剩余任务交给 loop 清理
             if snapshot:
                 try:
                     await _aio.wait(snapshot, timeout=2.0)
@@ -1343,13 +1312,13 @@ class JimiAgent:
                     logger.debug(f"等待 hot_tasks 完成失败（忽略）: {e}")
             tasks.clear()
 
-        # 2) 关 Memory（LangGraph checkpointer）
+        # 2) 关 Memory
         try:
             await self.memory.close()
         except Exception as e:
             logger.warning(f"关闭 Memory 失败: {e}")
 
-        # 3) 关 MemoryStore（长期记忆 SQLite）
+        # 3) 关 MemoryStore
         if self.memory_store is not None:
             try:
                 self.memory_store.close()
@@ -1364,7 +1333,7 @@ class JimiAgent:
     def invalidate_agent_cache(self):
         """清空 Agent graph 缓存（Skills / workspace / think level 变化后调用）"""
         self._agent_graph_cache.clear()
-        # state_graph 不依赖工具/prompt，保留
+        # state_graph 不依赖工具和 prompt，保留即可
 
     def _log_status(self):
         """输出当前状态"""

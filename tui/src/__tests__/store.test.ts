@@ -9,6 +9,7 @@ function reset() {
     pendingConfirm: null,
     currentSessionId: null,
     sessions: [],
+    sessionSelection: [],
     activity: null,
     activityLog: [],
     promptDraft: "",
@@ -66,6 +67,92 @@ describe("state/store", () => {
     const msgs = useStore.getState().messages;
     expect(msgs).toHaveLength(2);
     expect(msgs[1]?.content).toBe("AB");
+  });
+
+  it("appendAssistantChunk 超长内容触发 rollover：切首段为 head + 剩余 streaming body", () => {
+    // 模拟 24 行终端 -> maxLines=10, threshold=20
+    useStore.setState((s) => ({ ...s, dims: { cols: 80, rows: 24 } }));
+    const s = useStore.getState();
+    // 30 行内容：前 20 行切到 head，后 10 行留在 streaming body
+    const lines = Array.from({ length: 30 }, (_, i) => `line-${i + 1}`);
+    s.appendAssistantChunk(lines.join("\n"));
+    const msgs = useStore.getState().messages;
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]?.fragment).toBe("head");
+    expect(msgs[0]?.streaming).toBeFalsy();
+    expect(msgs[0]?.content.split("\n")).toHaveLength(20);
+    expect(msgs[0]?.content.split("\n")[0]).toBe("line-1");
+    expect(msgs[1]?.fragment).toBe("body");
+    expect(msgs[1]?.streaming).toBe(true);
+    expect(msgs[1]?.content.split("\n")).toHaveLength(10);
+    expect(msgs[1]?.content.split("\n")[0]).toBe("line-21");
+  });
+
+  it("连续 rollover：第二次切出的 fragment=body，streaming 仍 body", () => {
+    useStore.setState((s) => ({ ...s, dims: { cols: 80, rows: 24 } }));
+    const s = useStore.getState();
+    // 30 行触发首次 rollover（head + body streaming）
+    s.appendAssistantChunk(Array.from({ length: 30 }, (_, i) => `a${i}`).join("\n"));
+    // 再追加 20 行（streaming 从 10 -> 30 行，再次超阈值）
+    s.appendAssistantChunk("\n" + Array.from({ length: 20 }, (_, i) => `b${i}`).join("\n"));
+    const msgs = useStore.getState().messages;
+    expect(msgs).toHaveLength(3);
+    expect(msgs[0]?.fragment).toBe("head"); // 首次 rollover 的 head
+    expect(msgs[1]?.fragment).toBe("body"); // 第二次 rollover 的 body
+    expect(msgs[1]?.streaming).toBeFalsy();
+    expect(msgs[2]?.fragment).toBe("body"); // streaming 仍是 body
+    expect(msgs[2]?.streaming).toBe(true);
+  });
+
+  it("finishAssistantStreaming 把尾部 body 改为 tail 并加 marginBottom 语义", () => {
+    useStore.setState((s) => ({ ...s, dims: { cols: 80, rows: 24 } }));
+    const s = useStore.getState();
+    s.appendAssistantChunk(Array.from({ length: 30 }, (_, i) => `x${i}`).join("\n"));
+    s.finishAssistantStreaming();
+    const msgs = useStore.getState().messages;
+    expect(msgs.at(-1)?.fragment).toBe("tail");
+    expect(msgs.at(-1)?.streaming).toBeFalsy();
+  });
+
+  it("rollover 代码块保护：切点处于未闭合代码块内时跳过 rollover", () => {
+    useStore.setState((s) => ({ ...s, dims: { cols: 80, rows: 24 } }));
+    const s = useStore.getState();
+    // 前 15 行纯文本 + "```python" + 10 行未闭合代码，共 26 行。
+    // 初始 cut 落在代码块里，且后面找不到闭合 fence，所以本次 rollover 会放弃。
+    const parts = [
+      ...Array.from({ length: 15 }, (_, i) => `p${i}`),
+      "```python",
+      ...Array.from({ length: 10 }, (_, i) => `c${i}`),
+    ];
+    s.appendAssistantChunk(parts.join("\n"));
+    const msgs = useStore.getState().messages;
+    // 放弃本次 rollover，整段仍在单条 streaming message
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]?.streaming).toBe(true);
+    expect(msgs[0]?.fragment).toBeUndefined();
+  });
+
+  it("rollover 代码块保护：切点向后推到闭合 fence 后", () => {
+    useStore.setState((s) => ({ ...s, dims: { cols: 80, rows: 24 } }));
+    const s = useStore.getState();
+    // 前 15 行文本 + ```py + 3 行代码 + ``` + 后 15 行文本，共 35 行。
+    // 初始 cut 前缀里 fence 数为偶数，所以无需后推。
+    const parts = [
+      ...Array.from({ length: 15 }, (_, i) => `p${i}`),
+      "```py",
+      "c0",
+      "c1",
+      "c2",
+      "```",
+      ...Array.from({ length: 15 }, (_, i) => `q${i}`),
+    ];
+    s.appendAssistantChunk(parts.join("\n"));
+    const msgs = useStore.getState().messages;
+    expect(msgs).toHaveLength(2);
+    // 代码块完整落在 head 片段里
+    expect(msgs[0]?.content).toContain("```py");
+    expect(msgs[0]?.content).toContain("```");
+    expect(msgs[1]?.content.startsWith("q")).toBe(true);
   });
 
   it("clearMessages 清空并重置 streaming", () => {
@@ -176,6 +263,24 @@ describe("state/store", () => {
     );
     s.removeMemoryLocal(2);
     expect(useStore.getState().memories.map((m) => m.id)).toEqual([1, 3]);
+  });
+
+  it("toggleSessionSelection add/remove", () => {
+    const s = useStore.getState();
+    s.toggleSessionSelection("a");
+    s.toggleSessionSelection("b");
+    s.toggleSessionSelection("c");
+    expect(useStore.getState().sessionSelection).toEqual(["a", "b", "c"]);
+    s.toggleSessionSelection("b");
+    expect(useStore.getState().sessionSelection).toEqual(["a", "c"]);
+  });
+
+  it("setSessionSelection 覆盖 + 清空", () => {
+    const s = useStore.getState();
+    s.setSessionSelection(["x", "y", "z"]);
+    expect(useStore.getState().sessionSelection).toEqual(["x", "y", "z"]);
+    s.clearSessionSelection();
+    expect(useStore.getState().sessionSelection).toEqual([]);
   });
 
   it("toggleMemorySelection add/remove + 排序", () => {

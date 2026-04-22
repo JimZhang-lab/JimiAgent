@@ -4,7 +4,7 @@ Date: 2026-04-19 15:00:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 15:00:00
 FilePath: /JimiAgent/server/config/logging_setup.py
-Description: logging 初始化工具。
+Description: logging 初始化。
 
 '''
 from __future__ import annotations

@@ -4,7 +4,7 @@ Date: 2026-04-19 15:05:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 15:05:00
 FilePath: /JimiAgent/server/core/scheduler.py
-Description: Cron 调度器。
+Description: Cron 调度。
 
 '''
 from __future__ import annotations

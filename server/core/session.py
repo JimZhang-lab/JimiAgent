@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/server/core/session.py
-Description: 会话元信息管理器。
+Description: 会话元信息。
 
 '''
 import os

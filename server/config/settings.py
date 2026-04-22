@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/server/config/settings.py
-Description: 配置加载与环境变量覆盖。
+Description: 配置加载。
 
 '''
 import os
@@ -28,7 +28,7 @@ class ModelConfig:
     streaming: bool = True
     api_key: str = ""
     base_url: str = ""
-    # 可选备选模型列表
+    # 备选模型
     fallbacks: list = field(default_factory=list)
 
 
@@ -90,11 +90,11 @@ class MemoryConfig:
     # J 组扩展
     # off / on_compact / per_turn
     extract_mode: str = "per_turn"
-    # per_turn 单次抽取超时
+    # per_turn 单次超时
     extract_timeout_seconds: int = 10
     # auto 时沿用 agent_name
     namespace: str = "auto"
-    # procedural 规则注入上限
+    # procedural 注入上限
     procedural_inject_max: int = 10
 
 

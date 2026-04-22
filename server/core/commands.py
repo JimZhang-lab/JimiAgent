@@ -4,7 +4,7 @@ Date: 2026-04-19 01:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:10:00
 FilePath: /JimiAgent/server/core/commands.py
-Description: 斜杠命令分发器。
+Description: 斜杠命令分发。
 
 '''
 from __future__ import annotations

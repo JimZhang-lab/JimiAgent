@@ -22,8 +22,19 @@ export function useAgent() {
   const sendMessage = useCallback(
     (text: string) => {
       if (!text.trim()) return;
-      const sid = useStore.getState().currentSessionId;
+      const st = useStore.getState();
+      const sid = st.currentSessionId;
       if (!sid) return;
+      // 防御"幽灵会话"：currentSessionId 可能指向一个已被 delete_session 移除
+      // 的 id（session_deleted 事件到达与 wiring 本地切换之间存在窗口；或外部
+      // HTTP 脚本删了某会话而本端状态未同步）。若 sessions 列表非空且 sid 不
+      // 在列表里，说明进入了这种 race → 拒绝发送。
+      //
+      // sessions 列表为空时放行：启动期 list_sessions 响应可能还未到达，但
+      // ready/bootstrap 已设置 currentSessionId，这段窗口要允许发送。
+      if (st.sessions.length > 0 && !st.sessions.some((x) => x.id === sid)) {
+        return;
+      }
       appendMessage({
         id: nextMessageId(),
         role: "user",

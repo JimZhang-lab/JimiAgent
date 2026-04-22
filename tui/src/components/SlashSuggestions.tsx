@@ -13,29 +13,20 @@ export interface SlashSuggestion {
 }
 
 export interface SlashSuggestionsProps {
-  /** 是否激活（拥有键盘）。外层决定何时 true。 */
+  /** 是否激活（拥有键盘）。 */
   isActive: boolean;
-  /** 用户主动 Esc 关闭时触发；用于外层决定下次是否重新展示。 */
+  /** 用户主动 Esc 关闭时触发。 */
   onDismiss(): void;
-  /**
-   * Enter 时提交完整命令（例如 `/clear`）。
-   * 由 MainLayout 传入，走和普通消息一致的 submit 链路
-   * （`tryRunClientCommand` → client/server 命令或 agent）。
-   */
+  /** Enter 时提交完整命令（例如 `/clear`）。 */
   onSelect(text: string): void;
   /** 最多显示多少行候选（默认 6）。 */
   maxItems?: number;
 }
 
 /**
- * 斜杠命令行内补全：
- *   - 从 `store.promptDraft` 读取当前输入；draft 以 `/` 开头且不含空格才展示
- *   - 服务端命令通过 `list_commands` 请求拉取并缓存
- *   - ↑/↓ 选择；Tab 把命令名（带空格）写回 store；Esc 关闭本次补全
- *   - 列表长度 > maxItems 时，窗口以 cursor 为中心滑动
+ * 行内斜杠命令补全。
  *
- * 和 PromptInput 完全解耦：它只读 store.promptDraft，写回用 setPromptDraft。
- * 这样可以从 MainLayout 顶层渲染，不推挤其他 flex 块。
+ * 只读 store.promptDraft，匹配 client/server 命令，再把选中结果写回 store。
  */
 export function SlashSuggestions({
   isActive,
@@ -50,23 +41,21 @@ export function SlashSuggestions({
   const [cursor, setCursor] = useState(0);
   const [serverItems, setServerItems] = useState<SlashSuggestion[]>([]);
   const [dismissed, setDismissed] = useState(false);
-  // 记忆上次用户选中的命令名；再次打开 / 且没有更具体的匹配时，把 cursor 恢复到它。
-  // 不跨 App 生命周期持久化（没必要，ref 足够）。
+  // 记住上次选中的命令名，下次空查询时优先把 cursor 放回去。
   const lastPickedName = React.useRef<string | null>(null);
 
-  // 只在从"非 /"切到"/"时重置 dismissed；typing 过程中不乱动
+  // 只在从“非 /”切到“/”时重置 dismissed。
   const prevWasSlash = React.useRef(false);
   useEffect(() => {
     const isSlash = value.startsWith("/");
     if (isSlash && !prevWasSlash.current) {
       setDismissed(false);
-      // 不无条件清 cursor：先不动，等 filtered 算出来后在另一 effect 里定位到 lastPicked
+      // cursor 留给后面的 filtered effect 再决定
     }
     prevWasSlash.current = isSlash;
   }, [value]);
 
-  // 订阅 transport commands 事件：组件生命周期内只挂一次，避免重复订阅。
-  // 首次进入 `/` 模式时（serverItems 为空）触发 list_commands 请求。
+  // 组件生命周期内只订阅一次 commands 事件。
   useEffect(() => {
     const off = subscribeTransport((ev) => {
       if (ev.type === "commands") {
@@ -116,7 +105,7 @@ export function SlashSuggestions({
     return fuse.search(q).map((r) => r.item);
   }, [value, fuse, all]);
 
-  // cursor 越界 clamp：filtered 收缩后，把 cursor 拉回最后一项
+  // filtered 收缩后，把 cursor clamp 到可见范围
   useEffect(() => {
     if (filtered.length === 0) {
       if (cursor !== 0) setCursor(0);
@@ -127,8 +116,7 @@ export function SlashSuggestions({
     }
   }, [filtered.length, cursor]);
 
-  // 当面板刚打开且查询为空时，把 cursor 定位到上次用户选择过的命令（如果仍在列表里）。
-  // 仅在"从非 / 切到 /"时触发一次，避免输入过程被反复重置。
+  // 刚打开且空查询时，优先回到上次选中过的命令。
   useEffect(() => {
     if (!value.startsWith("/")) return;
     const q = value.replace(/^\//, "").trim();
@@ -140,7 +128,7 @@ export function SlashSuggestions({
     }
     const idx = filtered.findIndex((it) => it.name === name);
     if (idx >= 0 && cursor !== idx) setCursor(idx);
-    // filtered 与 value 都在依赖里，但 filtered 依赖链里已经包含 value，所以只需依赖 filtered
+    // filtered 依赖链里已包含 value，这里只依赖 filtered 即可
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filtered]);
 
@@ -149,9 +137,7 @@ export function SlashSuggestions({
   useInput(
     (input, key) => {
       if (!shown) return;
-      // 无匹配命令时，不消费 Enter / Tab / 方向键，交给 PromptInput 的 TextInput
-      // 正常处理（用户可能想把 `/abc` 这种未知命令当作普通消息发出去）。
-      // Esc 仍然可以 dismiss 面板。
+      // 无匹配时不拦 Enter / Tab / 方向键，让 PromptInput 继续处理。
       if (filtered.length === 0) {
         if (key.escape) {
           setDismissed(true);
@@ -170,9 +156,7 @@ export function SlashSuggestions({
           setValue(item.name + " ");
         }
       } else if (key.return) {
-        // Enter：直接执行选中命令（不带参数）。
-        // 同一事件里 TextInput 也会触发 onSubmit，但 PromptInput 已约定对
-        // slash-only draft 走 no-op，所以这里独占 submit 链路。
+        // Enter 直接执行选中命令。
         const item = filtered[cursor];
         if (item) {
           lastPickedName.current = item.name;
@@ -189,8 +173,6 @@ export function SlashSuggestions({
   );
 
   // 计算实际渲染高度，提前写回 store 供 MainLayout 扣预算。
-  //   - 不显示时 rows = 0，Messages 区可占满
-  //   - 显示时 = border 2 + 可能的上/下提示 + items + hint 1
   const visibleCount =
     shown && filtered.length > 0
       ? Math.min(filtered.length, maxItems)

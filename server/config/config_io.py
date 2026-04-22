@@ -4,7 +4,7 @@ Date: 2026-04-19 15:15:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 15:15:00
 FilePath: /JimiAgent/server/config/config_io.py
-Description: YAML 配置读写工具。
+Description: YAML 配置读写。
 
 '''
 from __future__ import annotations

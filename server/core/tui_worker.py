@@ -4,9 +4,7 @@ Date: 2026-04-21 02:00:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-21 02:00:00
 FilePath: /JimiAgent/server/core/tui_worker.py
-Description: React/Ink TUI 的 Python 端 worker。
-             通过 stdin/stdout NDJSON 与 Node TUI 通信。
-             不含任何渲染代码；所有 UI 呈现在 Node 端完成。
+Description: TUI Python worker。
 
 '''
 from __future__ import annotations
@@ -20,7 +18,7 @@ import time
 from dataclasses import asdict
 from typing import Any, AsyncGenerator, Optional
 
-# 关键：logging 必须走 stderr，否则会污染 stdout 的 NDJSON
+# logging 必须走 stderr，避免污染 stdout 的 NDJSON
 logging.basicConfig(
     level=os.environ.get("JIMI_TUI_WORKER_LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
@@ -28,7 +26,7 @@ logging.basicConfig(
     stream=sys.stderr,
     force=True,
 )
-# 压低第三方库噪音
+# 压低第三方日志
 for _noisy in ("httpx", "httpcore", "openai", "urllib3", "websockets"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
@@ -38,11 +36,7 @@ logger = logging.getLogger("jimi.tui_worker")
 WORKER_VERSION = "0.1.0"
 
 
-# ============================================================================
-# 斜杠命令清单（原 `server/core/tui.py` 的 SLASH_COMMANDS，迁入本模块作为
-# 唯一数据源；旧 rich.live TUI 已下线）
-# 顺序即补全列表顺序。
-# ============================================================================
+# 斜杠命令清单，顺序也就是补全顺序。
 
 SLASH_COMMANDS: dict[str, str] = {
     "/help":         "显示所有可用命令",
@@ -76,9 +70,7 @@ SLASH_COMMANDS: dict[str, str] = {
 }
 
 
-# ============================================================================
 # 输出：单例锁 + 行缓冲 flush
-# ============================================================================
 
 _stdout_lock = asyncio.Lock()
 
@@ -87,7 +79,7 @@ async def emit(event: dict) -> None:
     """把一个事件作为一行 JSON 写入 stdout（原子）。"""
     line = json.dumps(event, ensure_ascii=False) + "\n"
     async with _stdout_lock:
-        # 直接写二进制避免编码相关的 print 副作用
+        # 直接写二进制，避免 print 的编码副作用
         sys.stdout.buffer.write(line.encode("utf-8"))
         sys.stdout.buffer.flush()
 
@@ -102,9 +94,7 @@ def emit_sync(event: dict) -> None:
         pass
 
 
-# ============================================================================
 # Session/状态序列化
-# ============================================================================
 
 def session_to_dict(sess) -> dict:
     if sess is None:
@@ -148,9 +138,7 @@ def status_snapshot(agent, session_id: str) -> dict:
     }
 
 
-# ============================================================================
 # 请求分派
-# ============================================================================
 
 class WorkerShutdown(Exception):
     """shutdown 请求触发的退出信号。"""
@@ -161,7 +149,7 @@ class WorkerState:
 
     def __init__(self, agent):
         self.agent = agent
-        # 当前正在进行的 chat/resume 任务；新请求会先 cancel 旧的
+        # 当前 chat/resume 任务；新请求会先 cancel 旧的
         self.current_stream_task: Optional[asyncio.Task] = None
         self.current_stream_session: Optional[str] = None
 
@@ -223,6 +211,17 @@ async def handle_chat(state: WorkerState, req: dict) -> None:
         await emit({"type": "done", "session_id": "", "req_id": req_id})
         return
 
+    # 拒绝已删除会话，避免 LangGraph 用孤儿 thread_id 新开 checkpoint。
+    # 失败后顺手刷新 sessions，让前端尽快同步。
+    if state.agent.session_mgr.get_session(session_id) is None:
+        await emit({
+            "type": "error",
+            "content": f"chat: 会话 {session_id} 不存在或已删除，已拒绝发送",
+        })
+        await emit({"type": "done", "session_id": session_id, "req_id": req_id})
+        await handle_list_sessions(state, {"req_id": req_id})
+        return
+
     # 有旧流则先取消
     await cancel_current_stream(state)
 
@@ -244,6 +243,16 @@ async def handle_resume(state: WorkerState, req: dict) -> None:
     if not session_id:
         await emit({"type": "error", "content": "resume: 缺 session_id"})
         await emit({"type": "done", "session_id": "", "req_id": req_id})
+        return
+
+    # 同 handle_chat：拒绝不存在的 session，避免继续写孤儿线程
+    if state.agent.session_mgr.get_session(session_id) is None:
+        await emit({
+            "type": "error",
+            "content": f"resume: 会话 {session_id} 不存在或已删除",
+        })
+        await emit({"type": "done", "session_id": session_id, "req_id": req_id})
+        await handle_list_sessions(state, {"req_id": req_id})
         return
 
     await cancel_current_stream(state)
@@ -287,20 +296,7 @@ async def _emit_history_for(
     session_id: str,
     req_id: Optional[str] = None,
 ) -> None:
-    """读取 checkpointer 中会话的消息列表，转成一条 `history` 事件发送。
-
-    用于会话切换 / 首次进入时把历史消息"回放"到前端，配合 Ink <Static>
-    print-above 架构，历史对话会直接落到终端 scrollback 里供原生滚动查看。
-
-    消息角色映射（langchain_core.messages → 前端 MessageRole）：
-      - HumanMessage  → user
-      - AIMessage     → assistant（content 为空且仅有 tool_calls 的会被跳过）
-      - ToolMessage   → tool（content 前置"调用工具: <name>"）
-      - SystemMessage → system
-
-    读取失败 / 无历史时仍发送空 items 的 history 事件，让前端清晰知道
-    "回放完毕但无内容"，避免加载动画卡住。
-    """
+    """读取会话历史并发一条 `history` 事件。"""
     from langchain_core.messages import (
         AIMessage,
         HumanMessage,
@@ -321,8 +317,7 @@ async def _emit_history_for(
     for msg in messages:
         content = getattr(msg, "content", "") or ""
         if not isinstance(content, str):
-            # ContentBlocks（多模态）压成纯文本粗略展示；print-above 架构
-            # 不处理 inline 图片，后续可扩展
+            # 多模态 ContentBlocks 先粗略压成纯文本
             try:
                 content = json.dumps(content, ensure_ascii=False)
             except Exception:
@@ -333,7 +328,7 @@ async def _emit_history_for(
             role = "user"
         elif isinstance(msg, AIMessage):
             role = "assistant"
-            # 空 content 的 AIMessage 一般是纯 tool_call 决策，不对用户有价值，跳过
+            # 纯 tool_call 决策通常没有展示价值
             if not content.strip():
                 continue
         elif isinstance(msg, ToolMessage):
@@ -344,7 +339,7 @@ async def _emit_history_for(
         elif isinstance(msg, SystemMessage):
             role = "system"
         else:
-            # 未知类型，保守当 system
+            # 未知类型保守当 system
             role = "system"
 
         item: dict = {"role": role, "content": content}
@@ -361,7 +356,7 @@ async def _emit_history_for(
 
 
 async def handle_switch_session(state: WorkerState, req: dict) -> None:
-    # 发 session ACK + 回放历史消息，让前端能把整段对话写入 scrollback
+    # 先 ACK session，再回放历史
     session_id = req.get("session_id", "")
     req_id = req.get("req_id")
     sess = state.agent.session_mgr.get_session(session_id)
@@ -372,8 +367,7 @@ async def handle_switch_session(state: WorkerState, req: dict) -> None:
         })
     else:
         await emit({"type": "session", "session_id": session_id})
-        # 先发 session 事件让前端先 clearMessages / 切 currentSessionId，
-        # 再批量追加 history items，顺序与视觉一致
+        # 先切会话，再回放 history，保持视觉顺序一致
         await _emit_history_for(state, session_id, req_id)
     await emit({
         "type": "done",
@@ -384,16 +378,24 @@ async def handle_switch_session(state: WorkerState, req: dict) -> None:
 
 async def handle_new_session(state: WorkerState, req: dict) -> None:
     title = req.get("title") or "新对话"
+    req_id = req.get("req_id")
     sess = state.agent.session_mgr.create_session(title)
     await emit({"type": "session", "session_id": sess.id})
-    # 新会话必定无历史，但仍发一条空 history 事件，保证 UI 侧状态机对齐
-    await _emit_history_for(state, sess.id, req.get("req_id"))
-    # 同步把最新列表也发一次
-    await handle_list_sessions(state, {"req_id": req.get("req_id")})
+    # 新会话虽无历史，也补一条空 history 保持状态机对齐
+    await _emit_history_for(state, sess.id, req_id)
+    # 顺手刷新 sessions 列表
+    await handle_list_sessions(state, {"req_id": req_id})
+    # done 与其他 handler 保持同一语义
+    await emit({
+        "type": "done",
+        "session_id": sess.id,
+        "req_id": req_id,
+    })
 
 
 async def handle_delete_session(state: WorkerState, req: dict) -> None:
     session_id = req.get("session_id", "")
+    req_id = req.get("req_id")
     ok = state.agent.session_mgr.delete_session(session_id)
     if ok:
         try:
@@ -404,9 +406,16 @@ async def handle_delete_session(state: WorkerState, req: dict) -> None:
         "type": "session_deleted",
         "session_id": session_id,
         "ok": ok,
-        "req_id": req.get("req_id"),
+        "req_id": req_id,
     })
-    await handle_list_sessions(state, {"req_id": req.get("req_id")})
+    # 删光最后一条会话时兜底创建默认会话，避免系统进入零会话状态。
+    # 只在列表确实为空时触发，避免普通删除也意外新建会话。
+    if not state.agent.session_mgr.list_sessions():
+        default_sess = state.agent.session_mgr.ensure_default_session()
+        await emit({"type": "session", "session_id": default_sess.id})
+        # 新会话无历史，也补一条空 history
+        await _emit_history_for(state, default_sess.id, req_id)
+    await handle_list_sessions(state, {"req_id": req_id})
 
 
 async def handle_get_status(state: WorkerState, req: dict) -> None:
@@ -422,7 +431,7 @@ async def handle_ping(state: WorkerState, req: dict) -> None:
     await emit({"type": "pong", "req_id": req.get("req_id")})
 
 
-# 记忆操作 ==================================================================
+# 记忆操作
 
 def _memory_to_dict(m) -> dict:
     return {
@@ -561,9 +570,7 @@ async def dispatch(state: WorkerState, req: dict) -> None:
         })
 
 
-# ============================================================================
 # stdin 读取
-# ============================================================================
 
 async def stdin_lines() -> AsyncGenerator[str, None]:
     """异步行读取 stdin；EOF 时结束。"""
@@ -581,12 +588,10 @@ async def stdin_lines() -> AsyncGenerator[str, None]:
             logger.warning("stdin 解码失败: %s", e)
 
 
-# ============================================================================
 # 主入口
-# ============================================================================
 
 async def main_async() -> int:
-    # 延迟 import 避免启动慢
+    # 延迟 import，避免启动时把依赖一次拉满
     from server.core.agent import JimiAgent
 
     t0 = time.time()
@@ -642,7 +647,7 @@ async def main_async() -> int:
     except asyncio.CancelledError:
         pass
     finally:
-        # 优雅收尾：取消当前流，关闭 agent
+        # 优雅收尾：取消当前流并关闭 agent
         await cancel_current_stream(state)
         try:
             await agent.aclose()

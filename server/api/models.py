@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/server/api/models.py
-Description: API 模型定义。
+Description: API 模型。
 
 '''
 from pydantic import BaseModel, Field

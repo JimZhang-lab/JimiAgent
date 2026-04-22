@@ -7,7 +7,7 @@ import { resolveTheme } from "../themes/index.js";
 import { useVim, type VimIntent } from "../global/Vim.js";
 
 export interface PromptInputProps {
-  /** 真正的提交 handler；外层决定是走 agent 还是客户端命令。 */
+  /** 真正的提交 handler；外层决定走 agent 还是客户端命令。 */
   onSubmit(text: string): void;
   /** 是否处于 placeholder 模式（连接中/不可用）。 */
   disabled?: boolean;
@@ -15,10 +15,7 @@ export interface PromptInputProps {
   onCancel?: () => void;
 }
 
-/**
- * 输入框：value 来自 store.promptDraft（便于 MainLayout 做 layout 预算）。
- * SlashSuggestions 由 MainLayout 顶层渲染，不再在此处拼接。
- */
+/** 输入框本体；value 来自 store.promptDraft，方便 MainLayout 统一做布局预算。 */
 export function PromptInput({
   onSubmit,
   disabled,
@@ -32,13 +29,7 @@ export function PromptInput({
   const vim = useStore((s) => s.vim);
   const value = useStore((s) => s.promptDraft);
   const setValue = useStore((s) => s.setPromptDraft);
-  /**
-   * "忙碌"广义状态：streaming=true（已有 chunk 到达）或 activity=thinking/tool
-   * （已发送但 chunk 还没来 / 正在调工具）。
-   *
-   * 首次 chunk 到达之前的 TTFB 时段原先只显示静态 `>`，体感为"没反应"，
-   * 这里把 spinner 的显示条件扩大到整段忙碌期。
-   */
+  /** streaming 或 thinking/tool 都算忙碌，整段期间都显示 spinner。 */
   const busy =
     streaming ||
     activity?.kind === "thinking" ||
@@ -48,21 +39,20 @@ export function PromptInput({
   const [historyIdx, setHistoryIdx] = React.useState<number | null>(null);
 
   const isActive = focus === "prompt" && !pendingConfirm && !disabled;
-  // Vim 启用时，insert 模式接受输入；normal 模式 TextInput 失活
+  // Vim 开启时只有 insert 模式接收输入
   const textInputActive =
     isActive && (!vim.enabled || vim.mode === "insert");
 
-  // ↑/↓ 历史切换（仅非 vim.normal 模式激活；slash 模式让给补全面板）
+  // ↑/↓ 只在非 vim.normal 且非 slash 补全模式下切换历史
   useInput(
     (input, key) => {
       if (!isActive) return;
-      // Vim normal 下 Enter：TextInput 未 active，onSubmit 永远不触发。
-      // 若 draft 非空就当作"用户确认提交"走同一 handleSubmit；否则切回 insert。
+      // Vim normal 下 Enter：有 draft 就提交；空 draft 就切回 insert。
       if (vim.enabled && vim.mode === "normal" && key.return) {
         if (value.trim()) {
           handleSubmit(value);
         } else {
-          // 空 draft 按 Enter 进入 insert，等同于 `i` / `a`
+          // 空 draft 按 Enter 进入 insert
           useStore.getState().setVim({ mode: "insert" });
         }
         return;
@@ -85,8 +75,7 @@ export function PromptInput({
           setValue(history[next] ?? "");
         }
       } else if (input === "\u0003" /* Ctrl+C */ && busy) {
-        // 第一个 Ctrl+C 取消当前在跑的 agent，不等 chunk。
-        // 上层 App.tsx 的 双按 Ctrl+C 退出 仅在 !busy 时生效。
+        // busy 状态下第一个 Ctrl+C 先取消 agent，双按退出交给 App.tsx 的空闲态。
         onCancel?.();
       }
     },
@@ -117,11 +106,7 @@ export function PromptInput({
   const handleSubmit = (text: string) => {
     const t = text.trim();
     if (!t) return;
-    // 若 SlashSuggestions 本帧已消费 Enter（它会 setValue("") 清 draft），
-    // store.promptDraft 会先于 TextInput.onSubmit 被更新为 ""。
-    // 此时跳过重复提交。反之（SlashSuggestions 未消费——无匹配 / dismissed），
-    // 即使 text 是 "/abc"，也放行让外层 handleSubmit 去 tryRunClientCommand
-    // 或发给 agent，避免"Enter 黑洞"（旧版会直接静默 return）。
+    // 若 SlashSuggestions 本帧已消费 Enter，会先把 draft 清空；这里顺手跳过重复提交。
     if (useStore.getState().promptDraft === "" && text.length > 0) return;
     setHistory((h) => [...h.slice(-50), text]);
     setHistoryIdx(null);
@@ -176,15 +161,7 @@ export function PromptInput({
   );
 }
 
-/**
- * 根据当前忙碌状态选一条合适的 placeholder。
- *
- * 优先级：
- *   1. streaming=true → 模型正在吐 token。
- *   2. activity=tool   → 正在调用工具。
- *   3. activity=thinking → 已发送但还没 chunk 返回（TTFB）。
- *   4. 空闲→常规提示。
- */
+/** 根据当前状态挑一条合适的 placeholder。 */
 function placeholderFor(
   busy: boolean,
   kind: string | undefined,

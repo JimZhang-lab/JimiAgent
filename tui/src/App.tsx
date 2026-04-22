@@ -1,6 +1,7 @@
 import React, { useEffect, useCallback } from "react";
 import { useApp, useInput, useStdout } from "ink";
 import { MainLayout } from "./screens/MainLayout.js";
+import { HistoryStatic } from "./components/HistoryStatic.js";
 import type { AgentTransport } from "./transport/AgentTransport.js";
 import { useStore, nextMessageId } from "./state/store.js";
 import { wireTransport, sendRequest } from "./state/wiring.js";
@@ -10,7 +11,7 @@ import { useSelection } from "./hooks/useSelection.js";
 
 export interface AppProps {
   transport: AgentTransport;
-  /** 工作目录（由 cli 传入，供 Header / StatusBar 展示）。 */
+  /** cli 传入的工作目录，供 Header / StatusBar 展示。 */
   cwd?: string;
 }
 
@@ -35,14 +36,13 @@ export function App({ transport, cwd }: AppProps): React.ReactElement {
   const clearSelection = useStore((s) => s.clearSelection);
   const overlayOwnsEscape = useStore((s) => s.overlayOwnsEscape);
   const { cancel } = useAgent();
-  // 广义"忙碌"：streaming 或 thinking / tool 阶段都视作有活跃任务，
-  // Ctrl+C 在此期间行为是"取消"，而非"提示再按一次退出"。
+  // streaming / thinking / tool 都算忙碌；此时 Ctrl+C 优先视为取消。
   const busy =
     streaming ||
     activity?.kind === "thinking" ||
     activity?.kind === "tool";
 
-  // 挂 transport
+  // 绑定 transport
   useEffect(() => {
     const unbind = wireTransport(transport);
     return () => {
@@ -50,13 +50,12 @@ export function App({ transport, cwd }: AppProps): React.ReactElement {
     };
   }, [transport]);
 
-  // 把 cwd 写入 store 供 Header / StatusBar 读取
+  // 把 cwd 写入 store
   useEffect(() => {
     if (cwd) setWorkspaceCwd(cwd);
   }, [cwd, setWorkspaceCwd]);
 
-  // 向注册表上报全局键位元数据（/keys 命令会列出）。
-  // 只登记实际绑定的键位，避免 /help、/keys 输出虚假信息。
+  // 上报实际生效的键位，供 /keys 展示。
   useScopedBindings("global", [
     { key: "ctrl+c", description: "取消生成 / 关闭弹层 / 两次退出" },
     { key: "escape", description: "关闭弹层 / 退选区 / 焦点归位" },
@@ -76,11 +75,11 @@ export function App({ transport, cwd }: AppProps): React.ReactElement {
     { key: "escape", description: "退出选区" },
   ]);
 
-  // 选区键位：只在"非弹层 & 非 pendingConfirm"时激活
+  // 选区键位只在非弹层时激活
   const selectionActive = !paletteOpen && !historyOpen && !memoryOpen;
   useSelection({ isActive: selectionActive });
 
-  // 初始一次会话列表（ready 后拉取，供 HistoryPanel 使用）
+  // ready 后拉一次 sessions，供 HistoryPanel 使用
   useEffect(() => {
     if (!connected) return;
     sendRequest({ kind: "list_sessions" });
@@ -129,8 +128,7 @@ export function App({ transport, cwd }: AppProps): React.ReactElement {
     sendRequest({ kind: "list_memories", limit: 100 });
   }, [setPaletteOpen, setHistoryOpen, setMemoryOpen, setFocus, setMemoryLoading]);
 
-  // Ctrl+C 双按退出的计时戳。空闲状态下第一次 Ctrl+C 只给提示，
-  // 2s 内再按才真退出，避免误触直接杀会话。
+  // 空闲时双按 Ctrl+C 才退出，避免误触。
   const ctrlCArmedAt = React.useRef<number | null>(null);
   const appendMessage = useStore((s) => s.appendMessage);
   // 全局键盘：Ctrl+C / Ctrl+P / Ctrl+S / Ctrl+M / Esc
@@ -161,10 +159,10 @@ export function App({ transport, cwd }: AppProps): React.ReactElement {
       });
       return;
     }
-    // Esc：弹层有子模式时让步；否则依次关弹层/退选区/焦点归位。
+    // Esc：优先让弹层子模式处理，否则依次关弹层/退选区/焦点归位。
     if (key.escape) {
       if (overlayOwnsEscape) {
-        // 弹层自己消费本次 Esc（如搜索模式、待删除确认态）
+        // 弹层自己消费本次 Esc
         return;
       }
       if (paletteOpen || historyOpen || memoryOpen) {
@@ -180,8 +178,7 @@ export function App({ transport, cwd }: AppProps): React.ReactElement {
       }
       return;
     }
-    // Enter：focus=messages 且没弹层/选区/确认时，把焦点切回 prompt；避免
-    // 用户在消息区按回车"完全没反应"。
+    // messages 焦点下按 Enter 时回到 prompt，避免“没反应”。
     if (
       key.return &&
       focus === "messages" &&
@@ -193,8 +190,7 @@ export function App({ transport, cwd }: AppProps): React.ReactElement {
       setFocus("prompt");
       return;
     }
-    // Tab：prompt ↔ messages。
-    // 排除场景：弹层打开（面板内 Tab 有自己的语义）、slash 补全激活（Tab 补全命令名）
+    // Tab：prompt ↔ messages。弹层和 slash 补全激活时让出 Tab。
     const promptDraft = useStore.getState().promptDraft;
     const slashActive = promptDraft.startsWith("/") && !promptDraft.includes(" ");
     if (
@@ -235,13 +231,24 @@ export function App({ transport, cwd }: AppProps): React.ReactElement {
     // 因此这里不再绑定任何滚动相关快捷键。
   });
 
+  // 根层结构：HistoryStatic 和 MainLayout 是 Fragment 的直接子元素。
+  //
+  // Ink 5 的 <Static>（由 HistoryStatic 内部使用）要求挂在 Fragment 根下，
+  // 不能嵌套在 Box 里；否则 Static 的绝对定位会与父 Box 的 flex 布局冲突，
+  // 导致 `/new` 清空 messages 时 Static 重挂载错位甚至渲染卡死。
+  //
+  // HistoryStatic 永远挂载（items=[] 时也留着占位），MainLayout 负责所有
+  // 动态 UI（Header / pending 流式区 / PromptInput / 面板弹层 / StatusBar）。
   return (
-    <MainLayout
-      onExit={exit}
-      onOpenPalette={openPalette}
-      onOpenHistory={openHistory}
-      onOpenMemory={openMemory}
-      onCloseOverlays={closeOverlays}
-    />
+    <>
+      <HistoryStatic />
+      <MainLayout
+        onExit={exit}
+        onOpenPalette={openPalette}
+        onOpenHistory={openHistory}
+        onOpenMemory={openMemory}
+        onCloseOverlays={closeOverlays}
+      />
+    </>
   );
 }

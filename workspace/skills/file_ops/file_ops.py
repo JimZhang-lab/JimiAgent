@@ -3,10 +3,9 @@ Author: JimZhang
 LastEditors: Cascade
 LastEditTime: 2026-04-21
 FilePath: /JimiAgent/workspace/skills/file_ops/file_ops.py
-Description: 文件操作 Skill —— 统一走 server.core.safety_fs 判定。
+Description: 文件操作 Skill。
 
-与 builtin `write_file/read_file/list_dir` 行为等价；保留 skill 形式以兼容已有
-召回/workflow。新增 `confirm` 参数支持 dangerous→pending→confirm=true 重试模式。
+与 builtin 文件工具等价，保留 skill 形态兼容旧 workflow。
 '''
 from pathlib import Path
 

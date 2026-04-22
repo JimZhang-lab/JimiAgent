@@ -10,22 +10,9 @@ import {
 import { tokenize, normalizeLang, type TokenKind } from "../utils/highlight.js";
 
 /**
- * 极简 Markdown → Ink 渲染器。
+ * 极简 Markdown -> Ink 渲染器。
  *
- * 支持：
- *   - **粗体** / __粗体__
- *   - *斜体* / _斜体_
- *   - `inline code`
- *   - ``` code block ```（支持指定语言，M2 不做语法高亮）
- *   - # ## ### 标题（1-3 级）
- *   - - / * 无序列表项
- *   - 1. 有序列表项
- *   - > 引用
- *   - [text](url) 链接（只显示为 underline + accent 色）
- *
- * 以"行级 block"为单位解析；段内 inline 再独立解析。此实现故意保持
- * ~150 行内，可用但不完备；不适合渲染复杂文档（表格 / 嵌套列表等），
- * 但足以表达常见 LLM 输出。
+ * 覆盖常见标题、列表、引用、代码块、链接和表格；复杂嵌套不追求完整兼容。
  */
 export interface MarkdownProps {
   source: string;
@@ -36,10 +23,7 @@ export interface MarkdownProps {
 export function Markdown({ source, streaming }: MarkdownProps): React.ReactElement {
   const theme = resolveTheme(useStore((s) => s.theme));
 
-  // 流式中的消息每次追加 chunk 都会让 source 变化；如果每次都重新 parseBlocks
-  // 会退化为 O(n) 每帧（对几 KB 内容累积 O(n²)）。流式是"预览态"，退化为纯
-  // 文本 + 末尾光标即可，停止后再回到完整 Markdown parse。
-  // useMemo 永远调用（符合 Hooks 规则），条件只写在 factory 里。
+  // 流式阶段退回纯文本预览，避免每个 chunk 都重新 parse 整段 Markdown。
   const blocks = React.useMemo(
     () => (streaming ? null : parseBlocks(source)),
     [source, streaming],
@@ -65,9 +49,7 @@ export function Markdown({ source, streaming }: MarkdownProps): React.ReactEleme
   );
 }
 
-// ============================================================================
 // Block 解析
-// ============================================================================
 
 type Block =
   | { kind: "heading"; level: 1 | 2 | 3; text: string }
@@ -150,7 +132,7 @@ function parseBlocks(src: string): Block[] {
       out.push({ kind: "ol", items });
       continue;
     }
-    // 表格：header 行 + 分隔行（必须同时出现，否则按普通段落处理）
+    // 表格：必须同时有 header 行和分隔行
     if (line.includes("|") && isTableSeparator(lines[i + 1] ?? "")) {
       const header = splitTableRow(line);
       const align = parseTableAlign(lines[i + 1] ?? "", header.length);
@@ -163,7 +145,7 @@ function parseBlocks(src: string): Block[] {
         !/^```/.test(lines[i] ?? "")
       ) {
         const row = splitTableRow(lines[i] ?? "");
-        // 列数对齐到 header 长度：不足补空、超出截断
+        // 列数对齐到 header 长度
         while (row.length < header.length) row.push("");
         rows.push(row.slice(0, header.length));
         i++;
@@ -171,7 +153,7 @@ function parseBlocks(src: string): Block[] {
       out.push({ kind: "table", header, align, rows });
       continue;
     }
-    // 段落：聚合直到空行 / 块开始
+    // 段落：聚合直到下一个 block
     const buf: string[] = [line];
     i++;
     while (
@@ -183,7 +165,7 @@ function parseBlocks(src: string): Block[] {
       !/^[-*]\s+/.test(lines[i] ?? "") &&
       !/^\d+\.\s+/.test(lines[i] ?? "") &&
       !(lines[i] ?? "").startsWith("> ") &&
-      // 下一行如果构成 "header | sep" 表格起点，段落也要结束
+      // 下一行若构成表格起点，段落要结束
       !(
         (lines[i] ?? "").includes("|") &&
         isTableSeparator(lines[i + 1] ?? "")
@@ -197,7 +179,7 @@ function parseBlocks(src: string): Block[] {
   return out;
 }
 
-/** 判断是否 Markdown 表格分隔行（` | :--- | :---: | ---: | ` 之类）。 */
+/** 判断是否 Markdown 表格分隔行。 */
 function isTableSeparator(line: string): boolean {
   if (!line || !line.includes("|")) return false;
   const cells = line.split("|").map((c) => c.trim()).filter((c) => c !== "");
@@ -205,7 +187,7 @@ function isTableSeparator(line: string): boolean {
   return cells.every((c) => /^:?-{3,}:?$/.test(c));
 }
 
-/** 切分一行表格：忽略两端的 `|`，用 `|` 分割剩余。 */
+/** 切分一行表格。 */
 function splitTableRow(line: string): string[] {
   return line
     .replace(/^\s*\|/, "")
@@ -214,7 +196,7 @@ function splitTableRow(line: string): string[] {
     .map((c) => c.trim());
 }
 
-/** 从分隔行解析每列对齐。长度不够时补 left。 */
+/** 从分隔行解析列对齐；长度不够时补 left。 */
 function parseTableAlign(sepLine: string, n: number): TableAlign[] {
   const cells = sepLine
     .replace(/^\s*\|/, "")

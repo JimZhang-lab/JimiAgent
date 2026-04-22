@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/server/api/gateway.py
-Description: FastAPI 应用入口。
+Description: FastAPI 入口。
 
 '''
 import logging
@@ -35,16 +35,16 @@ async def lifespan(app: FastAPI):
     logger.info("  JimiAgent Gateway 启动中...")
     logger.info("=" * 50)
 
-    # 预置默认值，确保 finally 可用
+    # 先给 finally 兜底值
     scheduler = None
     registry = AgentRegistry()
     agents_cfg = settings.agents
 
     if agents_cfg.agent_list:
-        # 多 Agent 模式
+        # 多 Agent
         for acfg in agents_cfg.agent_list:
             name = acfg.get("name", "main")
-            # 为子 agent 派生独立配置
+            # 为子 agent 复制配置
             from copy import deepcopy
             from server.config.settings import ModelConfig
             child_settings = deepcopy(settings)
@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
         if agents_cfg.routing:
             registry.set_rules(agents_cfg.routing)
     else:
-        # 单 Agent 兼容模式
+        # 单 Agent
         agent_single = JimiAgent(settings)
         await agent_single.ainitialize()
         registry.register("main", agent_single)
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
     set_agent(agent)
     set_registry(registry)
 
-    # 定时任务调度器
+    # 调度器
     scheduler = Scheduler(agent, settings.scheduler)
     scheduler.start()
     set_scheduler(scheduler)

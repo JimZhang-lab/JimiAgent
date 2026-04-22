@@ -4,7 +4,7 @@ Date: 2026-04-19 17:55:00
 LastEditors: JimZhang
 LastEditTime: 2026-04-19 17:55:00
 FilePath: /JimiAgent/server/plugin/channels/pairing.py
-Description: Pairing 与 Allowlist 机制。
+Description: Pairing/Allowlist。
 '''
 import json
 import logging

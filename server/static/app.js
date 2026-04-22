@@ -1,10 +1,8 @@
-/**
- * JimiAgent WebChat — 前端交互逻辑
- */
+/** JimiAgent WebChat 前端交互逻辑。 */
 (function () {
   "use strict";
 
-  // === DOM ===
+  // DOM
   const $ = (sel) => document.querySelector(sel);
   const chatMessages = $("#chat-messages");
   const messageInput = $("#message-input");
@@ -26,7 +24,7 @@
   // 待发送图片：[{url, name, pending}]
   let pendingImages = [];
 
-  // === 状态 ===
+  // 状态
   let ws = null;
   let currentSessionId = null;
   let isStreaming = false;
@@ -34,7 +32,7 @@
   let reconnectAttempts = 0;
   const MAX_RECONNECT = 5;
 
-  // === WebSocket ===
+  // WebSocket
   function connectWebSocket() {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${location.host}/ws/chat`;
@@ -74,7 +72,7 @@
   function handleWSMessage(data) {
     switch (data.type) {
       case "session":
-        // /new 或初次连接都会发
+        // /new 或首次连接都会发
         if (currentSessionId !== data.session_id) {
           currentSessionId = data.session_id;
           loadSessions();
@@ -132,7 +130,7 @@
     }
   }
 
-  // === 上传辅助 ===
+  // 上传辅助
   async function uploadFile(file) {
     const fd = new FormData();
     fd.append("file", file, file.name || "image.png");
@@ -190,7 +188,7 @@
     }
   }
 
-  // === 发送消息 ===
+  // 发送消息
   function sendMessage() {
     const message = messageInput.value.trim();
     // 有图片时允许空文本

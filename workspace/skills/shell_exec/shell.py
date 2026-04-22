@@ -3,11 +3,9 @@ Author: JimZhang
 LastEditors: Cascade
 LastEditTime: 2026-04-21
 FilePath: /JimiAgent/workspace/skills/shell_exec/shell.py
-Description: Shell Skill —— 统一走 server.core.safety_fs 判定。
+Description: Shell Skill。
 
-与 builtin `bash` 工具行为等价：
-- safe 命令直接执行；写/未知命令需 confirm=true；毁灭性命令硬拒
-- safety 关闭时退化为原有 BLOCKED_PATTERNS 黑名单
+与 builtin `bash` 工具等价；safety 关闭时退回旧黑名单。
 '''
 import asyncio
 import re

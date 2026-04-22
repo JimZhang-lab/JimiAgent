@@ -4,7 +4,7 @@ Date: 2026-04-18 23:52:09
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/main.py
-Description: Uvicorn 启动入口。
+Description: Uvicorn 入口。
 
 '''
 

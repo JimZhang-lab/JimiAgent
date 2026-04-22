@@ -10,9 +10,7 @@ import type {
 } from "../protocol/events.js";
 import type { ThemeName } from "../themes/index.js";
 
-// ============================================================================
-// Message 领域模型（TUI 内部）
-// ============================================================================
+// Message 领域模型
 
 export type MessageRole =
   | "user"
@@ -23,43 +21,33 @@ export type MessageRole =
   | "confirm";
 
 export interface Message {
-  /** 客户端侧递增 id（不走网络） */
+  /** 客户端侧递增 id。 */
   id: string;
   role: MessageRole;
-  /** 渲染内容；assistant 用 markdown，其他是纯文本或 JSON */
+  /** 展示内容；assistant 走 markdown，其它走纯文本或 JSON。 */
   content: string;
-  /** assistant 专属：是否仍在流式增量中 */
+  /** assistant 专属：是否仍在流式中。 */
   streaming?: boolean;
-  /** tool 专属：工具名 */
+  /** tool 专属：工具名。 */
   toolName?: string;
-  /** confirm 专属：interrupt 元信息 */
+  /** confirm 专属：interrupt 元信息。 */
   confirm?: ConfirmPayload;
-  /** 创建时间戳（毫秒） */
+  /** assistant 分段标记，供 rollover 后区分首段/中段/尾段样式。 */
+  fragment?: "head" | "body" | "tail";
+  /** 创建时间戳（毫秒）。 */
   createdAt: number;
 }
 
-// ============================================================================
 // Store 状态
-// ============================================================================
 
-/**
- * 动作追踪：一次 agent 调用的"当前正在做什么"快照。
- *
- * 由 `tool` / `text` / `done` / `error` 事件推导：
- *   - 收到 `tool` 时 kind=tool，label=工具名
- *   - 收到第一条 `text` 且当前 kind!==thinking 时 kind=thinking
- *   - 收到 `done`/`error` 时清零
- */
+/** 当前 agent 正在做什么，由 tool/text/done/error 事件推导。 */
 export interface Activity {
   kind: "thinking" | "tool" | "confirm";
   label: string;
   since: number;
 }
 
-/**
- * 活动历史：顺序记录本轮对话的动作，供 Timeline 展示（右侧面板预留）。
- * 出于内存成本考虑，最多保留最近 200 条。
- */
+/** 最近活动记录，供未来 Timeline 面板使用，最多保留 200 条。 */
 export interface ActivityEntry {
   kind: "tool" | "text" | "confirm" | "error" | "done";
   label: string;
@@ -77,6 +65,8 @@ export interface Store {
   // 会话
   currentSessionId: string | null;
   sessions: SessionMeta[];
+  /** HistoryPanel 的多选 session id；删除事件会同步清理这里。 */
+  sessionSelection: string[];
 
   // 消息
   messages: Message[];
@@ -87,37 +77,24 @@ export interface Store {
   activity: Activity | null;
   activityLog: ActivityEntry[];
 
-  // 输入框当前 draft：lift 到 store 是为了让 MainLayout 能根据 draft 的前缀
-  // 同步决定 SlashSuggestions 是否显示、从而把高度纳入 flex 预算。
+  // 输入框 draft 提到 store，便于 MainLayout 统一计算 SlashSuggestions 高度。
   promptDraft: string;
 
-  /**
-   * Slash 补全面板当前实际占用的行数（0 = 不显示）。
-   * 由 SlashSuggestions 在 render 前写入，MainLayout 据此扣预算。
-   * 可能滞后一帧；但比硬编码 9 行宽松，无匹配时会自动收回。
-   */
+  /** Slash 补全面板当前占用的行数（0 = 不显示）。 */
   slashSuggestRows: number;
 
-  /**
-   * 工作目录：agent spawn 时的 cwd（项目根或 user cwd）。
-   * 只读展示给用户，不随会话切换；若后续支持 /cwd 热切换，这里应更新。
-   */
+  /** agent 启动时的 cwd，只读展示给用户。 */
   workspaceCwd: string;
 
   // 记忆面板
   memories: MemoryMeta[];
-  /** 最近一次查询字符串；空串 = 浏览最近记忆（list_recent） */
+  /** 最近一次记忆查询；空串表示浏览最近记忆。 */
   memoryQuery: string;
   memoryLoading: boolean;
-  /** 多选集合（id 数组；保持排序便于稳定比对） */
+  /** 记忆多选 id；保持排序方便稳定比对。 */
   memorySelection: number[];
 
-  /**
-   * 消息区键盘选区（Visual 模式）。
-   *
-   * 为 null 表示未激活；激活时 anchor/head 都是 messages 数组下标。
-   * 渲染时取 [min, max] 作为高亮范围；key handler 通过 head 移动扩大/缩小范围。
-   */
+  /** 消息区 Visual 选区；anchor/head 都是 messages 下标。 */
   selection: { anchor: number; head: number } | null;
 
   // UI
@@ -125,11 +102,7 @@ export interface Store {
   paletteOpen: boolean;
   historyOpen: boolean;
   memoryOpen: boolean;
-  /**
-   * 弹层的"Esc 消费权"。当非空时，全局 Esc 处理器应让步，由对应弹层自行处理。
-   * 目前仅 MemoryPanel 的搜索子模式 / HistoryPanel 的删除待确认会占用；
-   * 未来命令面板如果加子模式也可以用同一机制。
-   */
+  /** 弹层是否独占 Esc；为 true 时全局处理器让步。 */
   overlayOwnsEscape: boolean;
   theme: ThemeName;
   vim: { enabled: boolean; mode: VimMode };
@@ -143,9 +116,17 @@ export interface Store {
 
   setCurrentSession(id: string | null): void;
   setSessions(list: SessionMeta[]): void;
+  /** 切换单个 session id 的选中。 */
+  toggleSessionSelection(id: string): void;
+  /** 批量写入选择（用于 a 全选）。 */
+  setSessionSelection(ids: string[]): void;
+  /** 清空选择。 */
+  clearSessionSelection(): void;
 
   appendMessage(msg: Message): void;
   appendAssistantChunk(chunk: string): void;
+  /** 把 tool_result 输出追加到最后一条匹配的 tool 消息后面。 */
+  appendToolOutput(name: string, output: string): void;
   finishAssistantStreaming(): void;
   setPendingConfirm(p: ConfirmPayload | null): void;
   setStreaming(v: boolean): void;
@@ -170,9 +151,9 @@ export interface Store {
   /** 清空选择。 */
   clearMemorySelection(): void;
 
-  /** 进入消息区 visual 选区，锚点落在 index 位置。 */
+  /** 进入消息区 visual 选区，锚点落在 index。 */
   enterSelection(index: number): void;
-  /** 选区 head 相对移动 delta 并裁剪到 [0, messages.length-1]。 */
+  /** 让选区 head 相对移动 delta，并裁剪到消息范围内。 */
   moveSelectionHead(delta: number): void;
   /** 退出 visual 选区。 */
   clearSelection(): void;
@@ -194,14 +175,75 @@ export type FocusTarget =
   | "messages";
 export type VimMode = "normal" | "insert" | "visual";
 
-// ============================================================================
 // Store 实现
-// ============================================================================
 
 let msgIdSeq = 0;
 export function nextMessageId(): string {
   msgIdSeq += 1;
   return `m${Date.now()}-${msgIdSeq}`;
+}
+
+/** 计算 pending 区可保留的最大行数。 */
+function pendingMaxLines(rows: number): number {
+  return Math.max(3, Math.min(10, rows - 12));
+}
+
+/**
+ * streaming assistant 太长时，把旧行切成 stable 消息塞到前面。
+ *
+ * 这样动态区只保留最新几行，避免 Ink fullscreen 降级导致的重绘抖动。
+ */
+function rolloverStreamingInPlace(
+  s: { messages: Message[]; dims: { rows: number } },
+  streaming: Message,
+): void {
+  if (!streaming.streaming || streaming.role !== "assistant") return;
+  const maxLines = pendingMaxLines(s.dims.rows);
+  const threshold = maxLines * 2;
+  const lines = streaming.content.split(/\r?\n/);
+  if (lines.length <= threshold) return;
+
+  // 初始切点：尾部保留 maxLines 行
+  let cut = lines.length - maxLines;
+
+  // 若切点落在未闭合代码块里，就推到下一个 ``` 之后。
+  const countFences = (arr: string[]): number =>
+    arr.filter((l) => /^```/.test(l)).length;
+  if (countFences(lines.slice(0, cut)) % 2 === 1) {
+    let found = -1;
+    for (let i = cut; i < lines.length; i++) {
+      if (/^```/.test(lines[i]!)) {
+        found = i + 1;
+        break;
+      }
+    }
+    // 没闭合 fence 或推后已经吃光尾部时，放弃本次 rollover。
+    if (found < 0 || lines.length - found < 1) return;
+    cut = found;
+  }
+  // 至少给 streaming 尾部留 1 行
+  if (cut >= lines.length) return;
+
+  const rolloverContent = lines.slice(0, cut).join("\n");
+  const keptContent = lines.slice(cut).join("\n");
+
+  // 首次切出 head，后续切出 body。
+  const isFirst = !streaming.fragment;
+  const rolloverFragment: "head" | "body" = isFirst ? "head" : "body";
+
+  // 用 id 查 index，避免 immer draft 和 plain object 的引用比较问题。
+  const idx = s.messages.findIndex((m) => m.id === streaming.id);
+  if (idx < 0) return;
+  s.messages.splice(idx, 0, {
+    id: nextMessageId(),
+    role: "assistant",
+    content: rolloverContent,
+    streaming: false,
+    fragment: rolloverFragment,
+    createdAt: Date.now(),
+  });
+  streaming.content = keptContent;
+  streaming.fragment = "body";
 }
 
 export const useStore = create<Store>()(
@@ -214,6 +256,7 @@ export const useStore = create<Store>()(
 
       currentSessionId: null,
       sessions: [],
+      sessionSelection: [],
 
       messages: [],
       streaming: false,
@@ -267,6 +310,20 @@ export const useStore = create<Store>()(
         set((s) => {
           s.sessions = list;
         }),
+      toggleSessionSelection: (id) =>
+        set((s) => {
+          const i = s.sessionSelection.indexOf(id);
+          if (i >= 0) s.sessionSelection.splice(i, 1);
+          else s.sessionSelection.push(id);
+        }),
+      setSessionSelection: (ids) =>
+        set((s) => {
+          s.sessionSelection = [...ids];
+        }),
+      clearSessionSelection: () =>
+        set((s) => {
+          s.sessionSelection = [];
+        }),
 
       appendMessage: (msg) =>
         set((s) => {
@@ -288,13 +345,61 @@ export const useStore = create<Store>()(
             });
           }
           s.streaming = true;
+          // 从 messages 数组末尾重新拿引用（确保是 immer draft 而不是原 plain
+          // object），再做 rollover —— 否则在 push 新消息的分支里 streaming
+          // 修改不会被 immer 提交。
+          const streamingMsg = s.messages[s.messages.length - 1];
+          if (streamingMsg) rolloverStreamingInPlace(s, streamingMsg);
+        }),
+
+      appendToolOutput: (name, output) =>
+        set((s) => {
+          // 倒序找最后一条匹配 name 的 tool 消息（on_tool_start 刚 push 了一条）。
+          // 正常情况下它就是 messages 末尾。
+          for (let i = s.messages.length - 1; i >= 0; i--) {
+            const m = s.messages[i]!;
+            if (m.role === "tool" && m.toolName === name) {
+              // content 约定首行是 "调用工具: <name>"；把 output 追加在其后，
+              // 保持 MessageItem.extractToolOutput 能正确剥离。
+              if (!m.content || m.content.endsWith("\n")) {
+                m.content = (m.content || `调用工具: ${name}`) + output;
+              } else {
+                m.content = `${m.content}\n${output}`;
+              }
+              // 清 streaming 标志 → HistoryStatic 下一帧把它升华到 Static。
+              // 这是 tool 消息唯一的"流式结束"信号（tool 消息没有 text chunk）。
+              m.streaming = false;
+              return;
+            }
+            // 越过 assistant / text，不越过用户消息（防止把结果挂到上轮 tool 上）
+            if (m.role === "user") break;
+          }
+          // 兜底：未找到匹配 tool 消息，补一条（直接 non-streaming 进 Static）
+          s.messages.push({
+            id: nextMessageId(),
+            role: "tool",
+            content: `调用工具: ${name}\n${output}`,
+            toolName: name,
+            createdAt: Date.now(),
+          });
         }),
 
       finishAssistantStreaming: () =>
         set((s) => {
-          const last = s.messages[s.messages.length - 1];
-          if (last && last.role === "assistant" && last.streaming) {
-            last.streaming = false;
+          // 清理尾部所有还挂着 streaming=true 的消息（assistant 或 tool）。
+          // 典型情况：流结束 / 出错时 tool_result 可能因上游异常没到达，这里
+          // 兜底把 tool 消息也升华到 stable，避免它永远卡在 pending 区。
+          //
+          // 另外：若末段 assistant 是 rollover 产生的 body 段，把它标为 tail
+          // 以便 MessageItem 给它补 marginBottom 做视觉分隔（避免紧贴下一条
+          // 用户消息 / tool 消息）。
+          for (let i = s.messages.length - 1; i >= 0; i--) {
+            const m = s.messages[i]!;
+            if (!m.streaming) break;
+            m.streaming = false;
+            if (m.role === "assistant" && m.fragment === "body") {
+              m.fragment = "tail";
+            }
           }
           s.streaming = false;
         }),

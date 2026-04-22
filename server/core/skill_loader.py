@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/server/core/skill_loader.py
-Description: Skill 加载器。
+Description: Skill 加载。
 
 '''
 import importlib.util
@@ -25,11 +25,11 @@ class SkillMeta:
     description: str
     version: str = "1.0"
     dependencies: list[str] = field(default_factory=list)
-    instructions: str = ""              # SKILL.md 正文指令
-    script_path: Optional[Path] = None  # 关联的 Python 脚本
+    instructions: str = ""              # SKILL.md 正文
+    script_path: Optional[Path] = None  # 关联脚本
     skill_dir: Optional[Path] = None
 
-    # ---- OpenClaw metadata ----
+    # OpenClaw metadata
     requires_env: list[str] = field(default_factory=list)   # requires.env
     requires_bins: list[str] = field(default_factory=list)  # requires.bins
     requires_any_bins: list[str] = field(default_factory=list)  # requires.anyBins
@@ -42,12 +42,12 @@ class SkillMeta:
     os_list: list[str] = field(default_factory=list)  # ["macos","linux"]
     install_specs: list[dict] = field(default_factory=list)  # [{kind,formula,bins,...}]
 
-    # ---- exec runtime ----
+    # exec runtime
     exec_command: Optional[str] = None       # bash|node|python|go|deno|…
     exec_args: list[str] = field(default_factory=list)
     exec_env: dict = field(default_factory=dict)
     exec_timeout: int = 10                   # 秒
-    # 原始 frontmatter（供高级场景/调试；不做契约）
+    # 原始 frontmatter，供调试用
     raw_frontmatter: dict = field(default_factory=dict)
 
 
@@ -96,14 +96,14 @@ def parse_skill_md(skill_dir: Path) -> Optional[SkillMeta]:
     name = frontmatter.get("name", skill_dir.name)
     description = frontmatter.get("description", f"Skill: {name}")
 
-    # 查找关联 Python 脚本
+    # 查找关联脚本
     script_path = None
     for py_file in skill_dir.glob("*.py"):
         if py_file.name != "__init__.py":
             script_path = py_file
             break
 
-    # ---- 解析 OpenClaw metadata ----
+    # 解析 OpenClaw metadata
     ocmeta = _extract_openclaw_meta(frontmatter)
     requires = ocmeta.get("requires") or {}
     if not isinstance(requires, dict):
@@ -158,7 +158,7 @@ def parse_skill_md(skill_dir: Path) -> Optional[SkillMeta]:
     )
 
 
-# ---- 环境检查 ----
+# 环境检查
 
 def diagnose_skill(skill: SkillMeta) -> list[str]:
     """检查 skill 依赖，返回告警列表。"""
@@ -219,24 +219,17 @@ def _load_script_functions(script_path: Path) -> dict[str, Callable]:
 
 
 def build_tool_from_skill(skill: SkillMeta) -> list[StructuredTool]:
-    """
-    将一个 Skill 转换为 LangChain Tool(s)
-
-    优先级：
-    1. 声明了 `metadata.openclaw.exec` → 走子进程 runtime（K2）
-    2. 有 `*.py` → 动态导入所有公共函数（老行为）
-    3. 纯指令型 → 返回指令内容的信息 tool
-    """
+    """把 Skill 转成 LangChain Tool。"""
     tools: list[StructuredTool] = []
 
-    # K2: exec runtime 优先
+    # exec runtime 优先
     if skill.exec_command:
         from server.core.skill_exec import build_exec_tool
         t = build_exec_tool(skill)
         if t is not None:
             tools.append(t)
             return tools
-        # exec tool 构建失败时回退
+        # 失败时回退到旧路径
 
     if skill.script_path and skill.script_path.exists():
         # 有脚本时为公共函数生成 Tool
@@ -259,7 +252,7 @@ def build_tool_from_skill(skill: SkillMeta) -> list[StructuredTool]:
                 )
             tools.append(t)
     else:
-        # 纯指令型 Skill 返回信息 Tool
+        # 纯指令型 Skill 退化为信息 Tool
         instructions = skill.instructions
 
         def _info_tool() -> str:

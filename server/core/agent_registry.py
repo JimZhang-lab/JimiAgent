@@ -4,7 +4,7 @@ Date: 2026-04-19 18:15:00
 LastEditors: JimZhang
 LastEditTime: 2026-04-19 18:15:00
 FilePath: /JimiAgent/server/core/agent_registry.py
-Description: 多 Agent 路由注册表。
+Description: Agent 注册表。
 '''
 import logging
 import re

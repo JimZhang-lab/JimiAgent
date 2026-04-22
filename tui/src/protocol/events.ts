@@ -1,15 +1,10 @@
 /**
- * Stdio NDJSON 通信协议：Node TUI ⇄ Python tui_worker。
+ * Node TUI 与 Python tui_worker 的 NDJSON 协议。
  *
- * - Node → Python: NodeRequest
- * - Python → Node: AgentEvent
- *
- * 协议设计原则：一行一条 JSON，UTF-8；双向都容忍未知字段（不要 throw）。
+ * 一行一条 JSON，双向都容忍未知字段。
  */
 
-// ============================================================================
-// Python 端 meta 对象
-// ============================================================================
+// Python 端 meta
 
 export interface SessionMeta {
   id: string;
@@ -34,7 +29,7 @@ export interface StatusSnapshot {
   session_count: number;
 }
 
-/** 记忆元信息（从 MemoryStore.Memory 投影而来）。 */
+/** 记忆元信息。 */
 export interface MemoryMeta {
   id: number;
   kind: string;
@@ -62,9 +57,7 @@ export interface ConfirmPayload {
   };
 }
 
-// ============================================================================
-// Node → Python (请求)
-// ============================================================================
+// Node -> Python
 
 export type NodeRequest =
   | { kind: "init" }
@@ -106,14 +99,18 @@ export type NodeRequest =
   | { kind: "ping"; req_id?: string }
   | { kind: "shutdown" };
 
-// ============================================================================
-// Python → Node (事件)
-// ============================================================================
+// Python -> Node
 
-/** 1:1 映射 agent.chat_stream 的原生事件 */
+/** 1:1 映射 agent.chat_stream 的原生事件。 */
 export type AgentStreamEvent =
   | { type: "text"; content: string }
   | { type: "tool"; name: string }
+  | {
+      /** 工具完成后的输出；错误时以 `[error] ` 开头。 */
+      type: "tool_result";
+      name: string;
+      output: string;
+    }
   | { type: "session"; session_id: string }
   | { type: "error"; content: string }
   | {
@@ -124,15 +121,15 @@ export type AgentStreamEvent =
     }
   | ({ type: "confirm_required" } & ConfirmPayload);
 
-/** 历史消息条目（history 事件的 items） */
+/** history 事件里的历史消息条目。 */
 export interface HistoryItem {
   role: "user" | "assistant" | "tool" | "system";
   content: string;
-  /** tool role 专属：工具名 */
+  /** tool 角色专用：工具名。 */
   tool_name?: string;
 }
 
-/** TUI 专用 wrapper 事件 */
+/** TUI 额外封装的元事件。 */
 export type AgentMetaEvent =
   | {
       type: "ready";
@@ -142,11 +139,7 @@ export type AgentMetaEvent =
     }
   | { type: "done"; session_id: string; req_id?: string }
   | {
-      /**
-       * 会话历史批量回放。
-       * 由 switch_session / new_session 触发；前端收到后 bulk append，
-       * 让历史对话直接写入 terminal scrollback（print-above 架构）。
-       */
+      /** switch_session / new_session 后回放整段会话历史。 */
       type: "history";
       session_id: string;
       items: HistoryItem[];
@@ -190,9 +183,7 @@ export type AgentMetaEvent =
 
 export type AgentEvent = AgentStreamEvent | AgentMetaEvent;
 
-// ============================================================================
 // Type guards
-// ============================================================================
 
 export function isAgentEvent(x: unknown): x is AgentEvent {
   if (!x || typeof x !== "object") return false;
@@ -204,6 +195,7 @@ export function isStreamEvent(ev: AgentEvent): ev is AgentStreamEvent {
   return (
     ev.type === "text" ||
     ev.type === "tool" ||
+    ev.type === "tool_result" ||
     ev.type === "session" ||
     ev.type === "error" ||
     ev.type === "trace" ||

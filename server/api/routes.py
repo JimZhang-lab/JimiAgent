@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/server/api/routes.py
-Description: REST 与 WebSocket 路由。
+Description: API 路由。
 
 '''
 import asyncio
@@ -87,7 +87,7 @@ def get_scheduler():
     return _scheduler
 
 
-# REST 端点
+# REST
 
 @router.get("/api/status", response_model=StatusResponse)
 async def get_status():
@@ -113,7 +113,7 @@ async def chat(request: ChatRequest):
         session = agent.session_mgr.ensure_default_session()
         session_id = session.id
 
-    # 调用 Agent，避免裸 500
+    # 包装 Agent 异常，避免裸 500
     try:
         response, effective_sid = await agent.chat(
             request.message, session_id, images=request.images,
@@ -754,7 +754,7 @@ async def chat_resume_nonstream(request: ResumeRequest):
     return resp
 
 
-# WebSocket 端点
+# WebSocket
 
 @router.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
@@ -773,10 +773,7 @@ async def websocket_chat(websocket: WebSocket):
             session_id: str = ""
             resume_flag: Optional[bool] = None
 
-            # 统一 JSON 解析：兼容 3 种 payload
-            #   1) {"message": "...", "session_id": "...", "images": [...]}   普通对话
-            #   2) {"resume": true/false, "session_id": "..."}                resume confirm
-            #   3) 纯文本                                                     当消息
+            # 兼容普通 chat、resume confirm 和纯文本三种 payload。
             try:
                 payload = json.loads(data)
             except json.JSONDecodeError:
@@ -809,13 +806,13 @@ async def websocket_chat(websocket: WebSocket):
                 "session_id": session_id,
             })
 
-            # 选择 stream：resume 或普通 chat
+            # 选择 resume 或普通 chat
             if resume_flag is not None:
                 stream = agent.chat_stream_resume(session_id, resume_flag)
             else:
                 stream = agent.chat_stream(message, session_id, images=images)
 
-            # 转发结构化流事件
+            # 转发结构化事件
             try:
                 async for event in stream:
                     etype = event.get("type")

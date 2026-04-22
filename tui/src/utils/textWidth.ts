@@ -1,14 +1,7 @@
 /**
  * 终端显示宽度工具。
  *
- * 简化版 wcwidth：
- *   - 控制字符 (< 0x20, 0x7F) → 0
- *   - CJK 统一汉字 / 全角标点 / 韩日字符 / 常见 emoji → 2
- *   - 其他 → 1
- *
- * 牺牲精度换轻量：combining marks / zero-width joiner / flag sequences
- * 一律按单字符宽度算，实际终端可能显示为 0 或更大。误差对窗口裁剪与表格
- * 列宽估算影响可接受（最多 1 条消息偏移、1 列表格错位）。
+ * 是一份偏轻量的 wcwidth 近似实现，优先服务消息裁剪和表格列宽估算。
  */
 
 /** 计算字符串的终端显示宽度。 */
@@ -28,7 +21,7 @@ export function charWidth(ch: string): number {
   return 1;
 }
 
-/** 按显示宽度截断字符串；超出部分用 `…` 替换（宽度 1）。 */
+/** 按显示宽度截断字符串；超出部分用 `…` 替换。 */
 export function truncateToWidth(s: string, maxWidth: number): string {
   if (maxWidth <= 0) return "";
   if (displayWidth(s) <= maxWidth) return s;
@@ -60,16 +53,7 @@ export function padToWidth(
   return s + " ".repeat(pad);
 }
 
-/**
- * 把一段 content 按 `\n` 拆行，再把每一行按 `maxWidth` 列做硬换行。
- * 返回"扁平行数组"，每个元素都是一段"宽度 ≤ maxWidth"的文本。
- *
- * 用途：
- *   - Messages 滚动时按行级 viewOffset 裁剪
- *   - 估算单条消息在给定宽度下实际会占几屏行
- *
- * 不做智能 word-wrap；CJK / emoji 场景下按 grapheme（for-of）逐字扫。
- */
+/** 按 `maxWidth` 对每一行做硬换行，返回扁平行数组。 */
 export function wrapToWidth(content: string, maxWidth: number): string[] {
   if (maxWidth <= 0) return [""];
   const rawLines = content.split(/\r?\n/);
@@ -88,7 +72,7 @@ export function wrapToWidth(content: string, maxWidth: number): string[] {
     for (const ch of ln) {
       const cw = charWidth(ch);
       if (cw === 0) {
-        // combining / 控制字符：附加到 cur，不占列
+        // combining / 控制字符不占列
         cur += ch;
         continue;
       }
@@ -106,12 +90,7 @@ export function wrapToWidth(content: string, maxWidth: number): string[] {
   return out;
 }
 
-/**
- * 按 maxWidth wrap 后，取 `[from, to)` 范围的行重新 join。
- *
- * 典型用例：边界消息被滚动窗口"切顶/切底"时，只保留可见的那些行。
- * 若 from/to 超出范围会按数组边界裁剪；返回字符串（`\n` 连接）。
- */
+/** wrap 后截取 `[from, to)` 范围的行，并重新 join 成字符串。 */
 export function sliceWrappedLines(
   content: string,
   maxWidth: number,

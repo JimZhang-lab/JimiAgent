@@ -1,17 +1,8 @@
 #!/usr/bin/env node
 /**
- * Headless smoke test: spawn tui_worker 并走 NDJSON 协议，验证基本通信。
+ * Headless smoke：拉起 tui_worker，走一遍最基础的 NDJSON 通信。
  *
- * 用法：
- *   node tui/scripts/smoke-transport.mjs
- *
- * 期望输出顺序：
- *   [ready] agent=openai/... session=...
- *   [pong]
- *   [sessions] N items
- *   OK
- *
- * 非零退出 = smoke 失败。
+ * 用法：`node tui/scripts/smoke-transport.mjs`
  */
 import { spawn } from "node:child_process";
 import * as readline from "node:readline";
@@ -65,7 +56,7 @@ const timer = setTimeout(() => {
 }, timeoutMs);
 
 child.stderr.on("data", (buf) => {
-  // 不主动打印日志，避免干扰；只在失败时 dump
+  // 平时不主动打印 stderr，只在失败时 dump
   _stderrBuf += buf.toString();
 });
 let _stderrBuf = "";

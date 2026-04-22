@@ -1,14 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { wrapToWidth, sliceWrappedLines } from "../utils/textWidth.js";
 
-/**
- * 文本宽度工具单测。
- *
- * 注：历史上这些函数是 Messages 虚拟滚动窗口的核心（`pickVisibleMessages` /
- * `measureMessageRows` 依赖它们做行级切片）。print-above 架构改造后虚拟滚动
- * 逻辑全部删除，但 `wrapToWidth` / `sliceWrappedLines` 仍被 Markdown 代码块
- * 渲染复用，所以纯函数测试保留下来。
- */
+/** 文本宽度工具单测；虽然虚拟滚动已移除，但 Markdown 代码块仍在复用它们。 */
 describe("utils/textWidth wrapToWidth/sliceWrappedLines", () => {
   it("短行原样保留", () => {
     expect(wrapToWidth("hello", 10)).toEqual(["hello"]);

@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/server/plugin/channels/base.py
-Description: 渠道抽象与消息模型。
+Description: 渠道抽象。
 
 '''
 from abc import ABC, abstractmethod

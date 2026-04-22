@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:30:00
 FilePath: /JimiAgent/server/plugin/channels/webchat.py
-Description: WebChat 渠道占位实现。
+Description: WebChat 占位实现。
 
 '''
 import logging

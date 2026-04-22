@@ -4,7 +4,7 @@ Date: 2026-04-18 22:10:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-20 00:00:00
 FilePath: /JimiAgent/server/core/skill_retriever.py
-Description: Skill 召回引擎。
+Description: Skill 召回。
 '''
 import hashlib
 import json
@@ -26,7 +26,7 @@ from server.core.skill_loader import (
 logger = logging.getLogger(__name__)
 
 
-# Hybrid 检索工具函数
+# Hybrid 检索辅助
 
 _EN_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 
@@ -104,7 +104,7 @@ class SkillRetriever:
         self.similarity_threshold = similarity_threshold
         self.extra_skill_dirs: list[Path] = list(extra_skill_dirs or [])
 
-        # Hybrid 检索配置
+        # Hybrid 配置
         self._cfg = settings.skills
 
         # Skill 元信息缓存
@@ -115,7 +115,7 @@ class SkillRetriever:
         self._vector_retriever = None
         self._bm25_retriever = None
         self._hybrid_retriever = None
-        self._active_retriever = None        # 实际对外 retrieve 用的 retriever
+        self._active_retriever = None        # 当前对外 retriever
         self._active_mode: str = "none"      # hybrid / vector_only / bm25_only / none
         self._initialized = False
 
@@ -225,7 +225,7 @@ class SkillRetriever:
         embed_cfg = settings.embedding
         mode_cfg = (self._cfg.retrieval_mode or "hybrid").lower()
 
-        # 1. 扫 skill 元信息
+        # 1. 扫描 Skill 元信息
         for skill_dir in self._iter_skill_dirs():
             meta = parse_skill_md(skill_dir)
             if meta is not None:
@@ -238,7 +238,7 @@ class SkillRetriever:
 
         metas = list(self._skill_metas.values())
 
-        # 2. 构造 Vector 侧
+        # 2. Vector 通路
         need_vector = mode_cfg in ("hybrid", "vector_only")
         vector_ok = False
         if need_vector:
@@ -263,8 +263,8 @@ class SkillRetriever:
                 except Exception as e:
                     logger.warning(f"Vector 通路初始化失败: {e}")
 
-        # 3. 构造 BM25 侧
-        # CJK 走预分词 + token_pattern=\S+
+        # 3. BM25 通路
+        # CJK 先预分词，再用 token_pattern=\S+
         need_bm25 = mode_cfg in ("hybrid", "bm25_only")
         bm25_ok = False
         if need_bm25:
@@ -289,9 +289,9 @@ class SkillRetriever:
                 self._bm25_retriever = _CJKBM25Retriever.from_defaults(
                     nodes=weighted_nodes,
                     similarity_top_k=max(self.top_k * 2, self.top_k + 1),
-                    token_pattern=r"(?u)\S+",   # 每个空格分隔 token 独立
-                    skip_stemming=True,         # 跳过英语 stemmer，避免把中文字符误处理
-                    language="en",              # stopwords 用英语集合；对中文无影响
+                    token_pattern=r"(?u)\S+",   # 空格分词
+                    skip_stemming=True,         # 跳过英语 stemmer
+                    language="en",              # 仅复用英语 stopwords
                     verbose=False,
                 )
                 bm25_ok = True
@@ -434,7 +434,7 @@ class SkillRetriever:
                     f"QueryFusionRetriever 构造失败: {e!r}，降级为单路"
                 )
 
-        # 非 hybrid / 降级路径
+        # 非 hybrid 或降级路径
         if vector_ok:
             self._active_retriever = self._vector_retriever
             self._active_mode = "vector_only"
@@ -488,18 +488,18 @@ class SkillRetriever:
         for m in always_skills:
             _add(m)
 
-        # S2：空 query 短路 —— 无检索依据，返回 always + 全量（供下游自行决定）
+        # Step 2: 空 query 直接返回 always + 全量
         q_stripped = (query or "").strip()
         if not q_stripped:
             for m in self._skill_metas.values():
                 _add(m)
             return results
 
-        # Step 2: 精确名匹配
+        # Step 3: 精确名匹配
         for m in self._exact_name_matches(query):
             _add(m)
 
-        # Step 3/4: 缓存 -> 检索
+        # Step 4: 缓存 -> 检索
         if self._active_retriever is None:
             # 全量降级时直接返回全部
             for m in self._skill_metas.values():
@@ -507,7 +507,7 @@ class SkillRetriever:
             return results
 
         try:
-            # P2：缓存 key 标准化，避免大小写 / 首尾空格导致重复 miss
+            # 归一化缓存 key，避免重复 miss
             cache_key = q_stripped.lower()
             nodes = None
             if self._query_cache is not None:
@@ -532,7 +532,7 @@ class SkillRetriever:
                 if skill_name and skill_name in self._skill_metas:
                     _add(self._skill_metas[skill_name])
 
-            # 如果全被阈值过滤，至少保底一条
+            # 阈值全过滤时至少保底一条
             non_always_count = sum(1 for m in results if not m.always)
             if non_always_count == 0 and nodes:
                 first_name = nodes[0].metadata.get("skill_name", "")
@@ -547,7 +547,7 @@ class SkillRetriever:
             logger.error(f"Skills 检索失败: {e}，返回全量 Skills。")
             return list(self._skill_metas.values())
 
-    # ---------- 对外接口 ----------
+    # 对外接口
 
     def get_tools_for_query(self, query: str) -> list[StructuredTool]:
         """根据查询返回最相关的 LangChain Tools"""

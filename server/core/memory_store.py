@@ -4,7 +4,7 @@ Date: 2026-04-19 18:45:00
 LastEditors: JimZhang
 LastEditTime: 2026-04-19 18:45:00
 FilePath: /JimiAgent/server/core/memory_store.py
-Description: 跨会话长期记忆存储。
+Description: 长期记忆存储。
 '''
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ class Memory:
     updated_at: str
     source_session: str = ""
     hits: int = 0
-    score: float = 0.0  # 检索时填充（越大越相关）
+    score: float = 0.0  # 检索时填充，越大越相关
     # J 组扩展字段
     predicate: str = ""
     object: str = ""
@@ -90,8 +90,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
-# Memory 抽取 post-filter：拦截"AI 能力 / 权限 / 沙箱"类易变事实
-# 这些内容会随工具 / safety 配置变化而过时，不应进入持久记忆
+# 过滤易变的 AI 能力 / 权限 / 沙箱描述，避免脏数据进入长期记忆。
 _CAPABILITY_CLAIM_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"AI\s*(无法|不能|只能|仅能|只可|不可)(直接)?(访问|执行|读取|写入)"),
     re.compile(r"(无法|不能|只能)直接(访问|执行|读取)"),
@@ -111,10 +110,7 @@ _CAPABILITY_CLAIM_PATTERNS: tuple[re.Pattern, ...] = (
 
 
 def _looks_like_capability_claim(text: str) -> bool:
-    """判断文本是否像"AI 能力 / 权限边界 / 沙箱策略"叙述。
-
-    MemoryStore.extract_and_store 用，确保这些易变状态不进入持久记忆。
-    """
+    """判断文本是否像能力边界或沙箱描述。"""
     if not text:
         return False
     for rx in _CAPABILITY_CLAIM_PATTERNS:
@@ -153,8 +149,7 @@ class MemoryStore:
         self._conn: Optional[sqlite3.Connection] = None
         self._embed_model = None  # LlamaIndex BaseEmbedding 或 None
         self._embed_dim: Optional[int] = None
-        # S1+P1: 写入锁（RLock 支持嵌套：add → _find_duplicate 均在同一线程内取）
-        # 同时 sqlite3.connect(check_same_thread=False) 允许跨线程使用连接
+        # 写操作统一串行，且允许同一连接跨线程复用
         self._lock = threading.RLock()
 
     # 初始化
@@ -163,8 +158,7 @@ class MemoryStore:
         if self._conn is not None:
             return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # S1: check_same_thread=False 允许 FastAPI threadpool / 后台线程使用同一连接
-        # 安全前提是所有写入走 self._lock
+        # check_same_thread=False 允许 threadpool / 后台线程复用连接
         self._conn = sqlite3.connect(
             str(self.db_path), check_same_thread=False,
         )
@@ -362,7 +356,7 @@ class MemoryStore:
         now = _now_iso()
         vf = (valid_from or now).strip()
 
-        # S1+P1: select-then-update-then-insert 必须在同一锁内原子执行
+        # select/update/insert 需在同一锁内完成
         with self._lock:
             existing = self._conn.execute(
                 "SELECT id, object FROM memories "
@@ -373,20 +367,20 @@ class MemoryStore:
 
             for row in existing:
                 if (row["object"] or "") == obj:
-                    # 相同事实 → 仅 touch
+                    # 相同事实只 touch
                     self._conn.execute(
                         "UPDATE memories SET updated_at=?, hits=hits+1 WHERE id=?",
                         (now, int(row["id"])),
                     )
                     self._conn.commit()
                     return int(row["id"])
-                # 不同 object → 把旧的 valid_until 标为 vf（过期）
+                # object 变化时让旧事实过期
                 self._conn.execute(
                     "UPDATE memories SET valid_until=?, updated_at=? WHERE id=?",
                     (vf, now, int(row["id"])),
                 )
 
-            # 插入新三元组（text 存 "S P O" 便于 FTS 检索）
+            # text 里顺带存 "S P O"，便于 FTS
             text = f"{subject} {predicate} {obj}"
             vec = self._embed(text)
             blob = pickle.dumps(vec) if vec else None

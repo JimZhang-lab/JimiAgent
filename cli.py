@@ -4,7 +4,7 @@ Date: 2026-04-18 23:52:09
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 13:20:00
 FilePath: /JimiAgent/cli.py
-Description: JimiAgent CLI 入口。
+Description: CLI 入口。
 
 '''
 import asyncio
@@ -70,7 +70,7 @@ def start(host, port, verbose):
 @click.option("--session", "-s", default=None, help="恢复指定会话 ID")
 def chat(session):
     """终端交互式对话（React + Ink TUI）"""
-    # React/Ink TUI：spawn Node 子进程接管 TTY
+    # 交给 Node TUI 接管 TTY
     import shutil
     from pathlib import Path
 
@@ -95,22 +95,19 @@ def chat(session):
     env = dict(os.environ)
     if session:
         env["JIMI_TUI_SESSION"] = session
-    # 确保 worker 能找到 server/ 包
+    # 让 worker 能导入 server/
     env["PYTHONPATH"] = (
         str(project_root)
         + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     )
-    # 关键：用当前解释器（例如 conda env 下的 python），而不是 Node 端 PATH 里的第一个 python
+    # 固定使用当前解释器，避免命中错误的 Python
     if not env.get("JIMI_TUI_WORKER_CMD"):
         env["JIMI_TUI_WORKER_CMD"] = f"{sys.executable} -m server.core.tui_worker"
 
-    # 把用户启动 `jimi chat` 时的 cwd 透传给 worker，
-    # 这样 list_dir(".") / "当前文件夹" 语义才对齐用户直觉。
-    # Node TUI 会把 worker 的 cwd 设成 project root（为了 server.core 可导入），
-    # 故无法靠 Python 的 os.getcwd() 从 worker 里反推。
+    # 透传用户启动 `jimi chat` 时的 cwd，避免 worker 把 project root 误当当前目录。
     env["JIMI_USER_CWD"] = os.getcwd()
 
-    # execvp：让 Node 接管 TTY 与信号；当前 Python 进程被替换
+    # 用 execvp 让 Node 接管当前进程
     os.execvpe(node, [node, str(cli_js)], env)
 
 
@@ -127,8 +124,7 @@ def _print_status(agent):
     console.print()
 
 
-# 会话/技能/帮助展示已迁到 TUI。
-# 统一帮助走 CommandDispatcher 的 /help。
+# 会话与帮助展示已迁到 TUI。
 
 
 @cli.command()
@@ -140,7 +136,7 @@ def status():
     _print_status(agent)
 
 
-# sessions 子命令
+# sessions
 
 @cli.group()
 def sessions():
@@ -191,7 +187,7 @@ def sessions_delete(session_id):
     console.print(f"[green]已删除会话 {session_id}[/green]")
 
 
-# scheduler 子命令
+# scheduler
 
 @cli.group()
 def scheduler():
@@ -256,7 +252,7 @@ def scheduler_run(job_id):
     asyncio.run(_run())
 
 
-# ===== pairing 子命令 =====
+# pairing
 
 @cli.group()
 def pairing():
@@ -349,7 +345,7 @@ def pairing_add(channel, sender_id):
     console.print(f"[green]已加入 {channel}/{sender_id}[/green]")
 
 
-# ===== evolver 子命令 =====
+# evolver
 
 @cli.group()
 def evolver():
@@ -514,7 +510,7 @@ def evolver_genes():
     console.print(table)
 
 
-# ========== message 子命令 ==========
+# message
 
 @cli.group()
 def message():
@@ -616,7 +612,7 @@ def migrate_env(env_file, yaml_file, dry_run):
         k, v = line.split("=", 1)
         envs[k.strip()] = v.strip().strip('"').strip("'")
 
-    # .env 键到 yaml 模式
+    # .env -> yaml 映射
     mapping = [
         ("API_KEY", r'(^\s*api_key:\s*)"[^"]*"', "model.api_key"),
         ("BASE_URL", r'(^\s*base_url:\s*)"[^"]*"', "model.base_url"),
@@ -935,29 +931,29 @@ def onboard(install_daemon, uninstall_daemon):
 
     console.print(Panel("[bold]JimiAgent 配置向导[/bold]", border_style="cyan"))
 
-    # 1) API Key
+    # API Key
     api_key = click.prompt("LLM API Key", default="", show_default=False)
     if api_key.strip():
         set_value("agent.model.api_key", api_key.strip())
         console.print("[green]  ✔ API Key 已写入[/green]")
 
-    # 2) Base URL
+    # Base URL
     base_url = click.prompt("LLM Base URL（留空使用 OpenAI 默认）", default="", show_default=False)
     if base_url.strip():
         set_value("agent.model.base_url", base_url.strip())
         console.print("[green]  ✔ Base URL 已写入[/green]")
 
-    # 3) Model ID
+    # Model ID
     model_id = click.prompt("模型 ID", default="gpt-4o-mini")
     set_value("agent.model.model_id", model_id.strip())
     console.print("[green]  ✔ 模型已写入[/green]")
 
-    # 4) Agent Name
+    # Agent Name
     agent_name = click.prompt("Agent 名称（用于 @mention 激活）", default="jimi")
     set_value("agent.name", agent_name.strip())
     console.print("[green]  ✔ Agent 名称已写入[/green]")
 
-    # 5) Workspace
+    # Workspace
     workspace = click.prompt("Workspace 路径", default="./workspace")
     set_value("agent.workspace", workspace.strip())
     # 确保目录存在
@@ -969,7 +965,7 @@ def onboard(install_daemon, uninstall_daemon):
     (ws_path / "prompts").mkdir(exist_ok=True)
     console.print("[green]  ✔ Workspace 已创建[/green]")
 
-    # 6) Embedding（可选）
+    # Embedding（可选）
     if click.confirm("是否配置 Embedding（用于 Skills 语义召回）？", default=False):
         emb_key = click.prompt("Embedding API Key", default=api_key.strip() or "", show_default=False)
         if emb_key.strip():
@@ -1049,7 +1045,7 @@ def doctor():
             log_ok = False
     checks.append(("日志", log_summary, log_ok))
 
-    # DM 安全策略检查
+    # DM 安全策略
     warnings: list[tuple[str, str]] = []
     channels_raw = settings.channels.raw if hasattr(settings.channels, "raw") else {}
     for ch_name, ch_cfg in (channels_raw or {}).items():
@@ -1107,7 +1103,7 @@ def doctor():
         console.print("\n[bold yellow]部分检查未通过，请查看上方详情[/bold yellow]")
 
 
-# ===== plugins 子命令 =====
+# plugins
 
 @cli.group()
 def plugins():

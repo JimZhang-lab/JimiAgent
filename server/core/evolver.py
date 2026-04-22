@@ -4,7 +4,7 @@ Date: 2026-04-19 18:30:00
 LastEditors: JimZhang
 LastEditTime: 2026-04-19 18:30:00
 FilePath: /JimiAgent/server/core/evolver.py
-Description: Skill 进化引擎。
+Description: Skill 进化。
 '''
 import datetime
 import hashlib
@@ -196,7 +196,7 @@ class EvolutionEngine:
         """扫描并汇总可进化信号。"""
         signals: list[Signal] = []
 
-        # 源 1：tool_log.jsonl
+        # 来源 1：tool_log.jsonl
         tail: list[str] = []
         if self.tool_log_path.exists():
             try:
@@ -222,7 +222,7 @@ class EvolutionEngine:
                 error_samples.setdefault(name, str(rec.get("error", "")))
 
         for name, cnt in fail_count.items():
-            if cnt >= 3:  # 连续失败 3 次即发 signal
+            if cnt >= 3:  # 连续失败 3 次才发 signal
                 signals.append(Signal(
                     kind="skill_failure",
                     source=name,
@@ -280,7 +280,7 @@ class EvolutionEngine:
         """按 strategy 偏好从 genes 里选最佳匹配。"""
         candidates = [g for g in genes if g.kind == signal.kind]
         if not candidates:
-            # fallback: 匹配 kind="any"
+            # fallback 到 kind="any"
             candidates = [g for g in genes if g.kind == "any"]
         if not candidates:
             return None

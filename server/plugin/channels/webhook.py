@@ -4,7 +4,7 @@ Date: 2026-04-19 14:45:00
 LastEditors: 很拉风的James
 LastEditTime: 2026-04-19 14:45:00
 FilePath: /JimiAgent/server/plugin/channels/webhook.py
-Description: 通用 Webhook 渠道。
+Description: Webhook 渠道。
 
 '''
 import hashlib
