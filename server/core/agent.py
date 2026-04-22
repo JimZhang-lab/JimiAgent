@@ -620,9 +620,28 @@ class JimiAgent:
         return self.settings.session.default_think_level
 
     def _build_system_prompt(self, think_level: str) -> str:
-        """Workspace 基础 prompt + think level 追加段"""
+        """Workspace 基础 prompt + 运行时环境 + think level 追加段。
+
+        运行时环境段的存在是为了让 LLM 正确区分 "用户 CWD" 与 "workspace"：
+        没有这段提示时 LLM 会把两者混为一谈，甚至凭直觉选 ~/Desktop。
+        """
+        from server.core.file_tools import user_cwd  # 延迟 import 避免循环
+
         base = self.workspace.build_system_prompt()
-        return f"{base}\n\n---\n\n{think_prompt_for(think_level)}"
+        env_section = (
+            "## 运行时环境\n"
+            f"- 用户当前目录（CWD，即用户说「当前文件夹」「这里」时所指）："
+            f"`{user_cwd()}`\n"
+            f"- 项目 workspace（agent 的配置与 SKILL.md 所在）："
+            f"`{self.settings.workspace_abs_path}`\n"
+            "- 两者通常**不同**。处理用户请求时：\n"
+            "  - 不确定路径，就先调用 `get_cwd` 工具确认\n"
+            "  - `list_dir()` 无参数默认指向 CWD 而非 workspace"
+        )
+        return (
+            f"{base}\n\n---\n\n{env_section}\n\n---\n\n"
+            f"{think_prompt_for(think_level)}"
+        )
 
     def _build_input_messages(
         self,

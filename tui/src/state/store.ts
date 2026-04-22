@@ -87,12 +87,22 @@ export interface Store {
   activity: Activity | null;
   activityLog: ActivityEntry[];
 
-  // 消息滚动
-  viewOffset: number; // 0 = 停在最新；>0 = 向上滚了多少条
-
   // 输入框当前 draft：lift 到 store 是为了让 MainLayout 能根据 draft 的前缀
   // 同步决定 SlashSuggestions 是否显示、从而把高度纳入 flex 预算。
   promptDraft: string;
+
+  /**
+   * Slash 补全面板当前实际占用的行数（0 = 不显示）。
+   * 由 SlashSuggestions 在 render 前写入，MainLayout 据此扣预算。
+   * 可能滞后一帧；但比硬编码 9 行宽松，无匹配时会自动收回。
+   */
+  slashSuggestRows: number;
+
+  /**
+   * 工作目录：agent spawn 时的 cwd（项目根或 user cwd）。
+   * 只读展示给用户，不随会话切换；若后续支持 /cwd 热切换，这里应更新。
+   */
+  workspaceCwd: string;
 
   // 记忆面板
   memories: MemoryMeta[];
@@ -102,11 +112,25 @@ export interface Store {
   /** 多选集合（id 数组；保持排序便于稳定比对） */
   memorySelection: number[];
 
+  /**
+   * 消息区键盘选区（Visual 模式）。
+   *
+   * 为 null 表示未激活；激活时 anchor/head 都是 messages 数组下标。
+   * 渲染时取 [min, max] 作为高亮范围；key handler 通过 head 移动扩大/缩小范围。
+   */
+  selection: { anchor: number; head: number } | null;
+
   // UI
   focus: FocusTarget;
   paletteOpen: boolean;
   historyOpen: boolean;
   memoryOpen: boolean;
+  /**
+   * 弹层的"Esc 消费权"。当非空时，全局 Esc 处理器应让步，由对应弹层自行处理。
+   * 目前仅 MemoryPanel 的搜索子模式 / HistoryPanel 的删除待确认会占用；
+   * 未来命令面板如果加子模式也可以用同一机制。
+   */
+  overlayOwnsEscape: boolean;
   theme: ThemeName;
   vim: { enabled: boolean; mode: VimMode };
   dims: { cols: number; rows: number };
@@ -130,13 +154,9 @@ export interface Store {
   beginActivity(kind: Activity["kind"], label: string): void;
   endActivity(outcome?: "done" | "error", error?: string): void;
 
-  setViewOffset(n: number): void;
-  /** 相对调整 viewOffset；会在消息总数范围内裁剪。 */
-  scrollBy(delta: number): void;
-  scrollToBottom(): void;
-  scrollToTop(): void;
-
   setPromptDraft(v: string): void;
+  setSlashSuggestRows(n: number): void;
+  setWorkspaceCwd(cwd: string): void;
 
   setMemories(items: MemoryMeta[], query?: string): void;
   removeMemoryLocal(id: number): void;
@@ -150,9 +170,17 @@ export interface Store {
   /** 清空选择。 */
   clearMemorySelection(): void;
 
+  /** 进入消息区 visual 选区，锚点落在 index 位置。 */
+  enterSelection(index: number): void;
+  /** 选区 head 相对移动 delta 并裁剪到 [0, messages.length-1]。 */
+  moveSelectionHead(delta: number): void;
+  /** 退出 visual 选区。 */
+  clearSelection(): void;
+
   setFocus(f: FocusTarget): void;
   setPaletteOpen(v: boolean): void;
   setHistoryOpen(v: boolean): void;
+  setOverlayOwnsEscape(v: boolean): void;
   setTheme(t: ThemeName): void;
   setVim(next: Partial<{ enabled: boolean; mode: VimMode }>): void;
   setDims(cols: number, rows: number): void;
@@ -194,19 +222,22 @@ export const useStore = create<Store>()(
       activity: null,
       activityLog: [],
 
-      viewOffset: 0,
-
       promptDraft: "",
+      slashSuggestRows: 0,
+      workspaceCwd: "",
 
       memories: [],
       memoryQuery: "",
       memoryLoading: false,
       memorySelection: [],
 
+      selection: null,
+
       focus: "prompt",
       paletteOpen: false,
       historyOpen: false,
       memoryOpen: false,
+      overlayOwnsEscape: false,
       theme: "auto",
       vim: { enabled: false, mode: "insert" },
       dims: { cols: 80, rows: 24 },
@@ -285,7 +316,6 @@ export const useStore = create<Store>()(
           s.pendingConfirm = null;
           s.activity = null;
           s.activityLog = [];
-          s.viewOffset = 0;
         }),
 
       beginActivity: (kind, label) =>
@@ -320,30 +350,17 @@ export const useStore = create<Store>()(
           s.activity = null;
         }),
 
-      setViewOffset: (n) =>
-        set((s) => {
-          s.viewOffset = Math.max(0, n);
-        }),
-
-      scrollBy: (delta) =>
-        set((s) => {
-          const max = Math.max(0, s.messages.length - 1);
-          s.viewOffset = Math.max(0, Math.min(max, s.viewOffset + delta));
-        }),
-
-      scrollToBottom: () =>
-        set((s) => {
-          s.viewOffset = 0;
-        }),
-
-      scrollToTop: () =>
-        set((s) => {
-          s.viewOffset = Math.max(0, s.messages.length - 1);
-        }),
-
       setPromptDraft: (v) =>
         set((s) => {
           s.promptDraft = v;
+        }),
+      setSlashSuggestRows: (n) =>
+        set((s) => {
+          s.slashSuggestRows = Math.max(0, Math.floor(n));
+        }),
+      setWorkspaceCwd: (cwd) =>
+        set((s) => {
+          s.workspaceCwd = cwd;
         }),
 
       setMemories: (items, query) =>
@@ -391,6 +408,34 @@ export const useStore = create<Store>()(
           s.memorySelection = [];
         }),
 
+      enterSelection: (index) =>
+        set((s) => {
+          const n = s.messages.length;
+          if (n === 0) {
+            s.selection = null;
+            return;
+          }
+          const i = Math.max(0, Math.min(n - 1, index));
+          s.selection = { anchor: i, head: i };
+        }),
+      moveSelectionHead: (delta) =>
+        set((s) => {
+          if (!s.selection) return;
+          const n = s.messages.length;
+          if (n === 0) {
+            s.selection = null;
+            return;
+          }
+          const next = Math.max(0, Math.min(n - 1, s.selection.head + delta));
+          s.selection.head = next;
+          // print-above 架构下，已经打印到 terminal scrollback 的消息无法再高亮；
+          // 选区仅对"pending 尾部"的流式消息可见，不再做 viewOffset 跟随。
+        }),
+      clearSelection: () =>
+        set((s) => {
+          s.selection = null;
+        }),
+
       setFocus: (f) =>
         set((s) => {
           s.focus = f;
@@ -402,6 +447,10 @@ export const useStore = create<Store>()(
       setHistoryOpen: (v) =>
         set((s) => {
           s.historyOpen = v;
+        }),
+      setOverlayOwnsEscape: (v) =>
+        set((s) => {
+          s.overlayOwnsEscape = v;
         }),
       setTheme: (t) =>
         set((s) => {

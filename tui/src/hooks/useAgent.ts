@@ -16,6 +16,8 @@ export function useAgent() {
   const appendMessage = useStore((s) => s.appendMessage);
   const clearMessages = useStore((s) => s.clearMessages);
   const setPendingConfirm = useStore((s) => s.setPendingConfirm);
+  const beginActivity = useStore((s) => s.beginActivity);
+  const endActivity = useStore((s) => s.endActivity);
 
   const sendMessage = useCallback(
     (text: string) => {
@@ -28,47 +30,70 @@ export function useAgent() {
         content: text,
         createdAt: Date.now(),
       });
+      // 立即进入 thinking 状态，ActivityBar 就能显示 spinner。
+      // 首个 text / tool 事件会把 kind 切成具体 label（wiring.ts 已处理）。
+      beginActivity("thinking", "正在思考…");
       sendRequest({
         kind: "chat",
         session_id: sid,
         message: text,
       });
     },
-    [appendMessage],
+    [appendMessage, beginActivity],
   );
 
   const cancel = useCallback(() => {
     const sid = useStore.getState().currentSessionId;
     if (!sid) return;
+    // 本地立刻清 activity，避免 UI 残留；Python 端 cancel 也会发 done
+    endActivity("done");
     sendRequest({ kind: "cancel", session_id: sid });
-  }, []);
+  }, [endActivity]);
 
   const approve = useCallback(() => {
     const sid = useStore.getState().currentSessionId;
     if (!sid) return;
     setPendingConfirm(null);
+    // 恢复后同样有空白期（工具继续执行或模型继续生成），先置 thinking
+    beginActivity("thinking", "已允许，继续执行…");
     sendRequest({ kind: "resume", session_id: sid, approve: true });
-  }, [setPendingConfirm]);
+  }, [setPendingConfirm, beginActivity]);
 
   const deny = useCallback(() => {
     const sid = useStore.getState().currentSessionId;
     if (!sid) return;
     setPendingConfirm(null);
+    beginActivity("thinking", "已拒绝，继续…");
     sendRequest({ kind: "resume", session_id: sid, approve: false });
-  }, [setPendingConfirm]);
+  }, [setPendingConfirm, beginActivity]);
 
-  const newSession = useCallback((title?: string) => {
-    sendRequest({ kind: "new_session", title });
-  }, []);
+  const newSession = useCallback(
+    (title?: string) => {
+      // 本地立刻清，避免 Python 还在走 session 事件时 user 先看到残留的旧消息。
+      // Python 回发 session 事件时 id 改变会再清一次，幂等。
+      clearMessages();
+      sendRequest({ kind: "new_session", title });
+    },
+    [clearMessages],
+  );
 
-  const switchSession = useCallback((sessionId: string) => {
-    sendRequest({ kind: "switch_session", session_id: sessionId });
-    clearMessages();
-  }, [clearMessages]);
+  const switchSession = useCallback(
+    (sessionId: string) => {
+      sendRequest({ kind: "switch_session", session_id: sessionId });
+      clearMessages();
+    },
+    [clearMessages],
+  );
 
-  const deleteSession = useCallback((sessionId: string) => {
-    sendRequest({ kind: "delete_session", session_id: sessionId });
-  }, []);
+  const deleteSession = useCallback(
+    (sessionId: string) => {
+      // 若删的是当前会话，本地先清一下；Python 之后会回发新的 session 事件。
+      const cur = useStore.getState().currentSessionId;
+      if (cur === sessionId) clearMessages();
+      sendRequest({ kind: "delete_session", session_id: sessionId });
+    },
+    [clearMessages],
+  );
 
   const refreshSessions = useCallback(() => {
     sendRequest({ kind: "list_sessions" });

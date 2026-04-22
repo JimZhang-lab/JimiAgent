@@ -124,6 +124,14 @@ export type AgentStreamEvent =
     }
   | ({ type: "confirm_required" } & ConfirmPayload);
 
+/** 历史消息条目（history 事件的 items） */
+export interface HistoryItem {
+  role: "user" | "assistant" | "tool" | "system";
+  content: string;
+  /** tool role 专属：工具名 */
+  tool_name?: string;
+}
+
 /** TUI 专用 wrapper 事件 */
 export type AgentMetaEvent =
   | {
@@ -133,6 +141,17 @@ export type AgentMetaEvent =
       default_session_id: string;
     }
   | { type: "done"; session_id: string; req_id?: string }
+  | {
+      /**
+       * 会话历史批量回放。
+       * 由 switch_session / new_session 触发；前端收到后 bulk append，
+       * 让历史对话直接写入 terminal scrollback（print-above 架构）。
+       */
+      type: "history";
+      session_id: string;
+      items: HistoryItem[];
+      req_id?: string;
+    }
   | {
       type: "sessions";
       items: SessionMeta[];

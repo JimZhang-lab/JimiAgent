@@ -49,7 +49,7 @@ async function main(): Promise<number> {
   }
 
   const renderer = new InkRenderer();
-  const handle = await renderer.mount(<App transport={transport} />);
+  const handle = await renderer.mount(<App transport={transport} cwd={cwd} />);
 
   // 信号处理：Ctrl+C 等效 App.exit，触发 waitUntilExit
   const onSignal = () => {

@@ -37,12 +37,12 @@ export function MainLayout({
   onOpenMemory,
   onCloseOverlays,
 }: MainLayoutProps): React.ReactElement {
-  // 从 store 读反应式 dims，由 App.tsx 的 resize listener 更新
-  const dims = useStore((s) => s.dims);
-  // 安全边距 1 行：macOS IME 候选窗、Terminal.app 的 status line 都可能蚕食底部；
-  // 留一行余量可避免总渲染高度贴着 stdout.rows 时触发终端原生 scroll。
-  const rows = Math.max(dims.rows - 1, 10);
-  const cols = Math.max(dims.cols, 20);
+  // print-above 架构下，外层容器不再硬设 height/overflow：
+  //   - 消息区通过 <Static> 把每条消息逐条打印到 terminal stdout，
+  //     打印后内容进入终端 scrollback，用户靠原生终端滚动就能回看完整历史
+  //   - 只有动态 UI（Header / ActivityBar / SlashSuggestions / PromptInput /
+  //     StatusBar / ConfirmBanner）保留在屏幕底部，被 Ink 按需重绘
+  // 不再计算 contentRows / confirmRows / activityRows 预算，交给 Ink 自然 layout。
   const theme = resolveTheme(useStore((s) => s.theme));
   const connected = useStore((s) => s.connected);
   const bootError = useStore((s) => s.bootError);
@@ -50,23 +50,7 @@ export function MainLayout({
   const paletteOpen = useStore((s) => s.paletteOpen);
   const historyOpen = useStore((s) => s.historyOpen);
   const memoryOpen = useStore((s) => s.memoryOpen);
-  const activity = useStore((s) => s.activity);
-  const streaming = useStore((s) => s.streaming);
-  const promptDraft = useStore((s) => s.promptDraft);
   const { sendMessage, cancel, newSession, refreshSessions } = useAgent();
-
-  // 动态 overlay 的占列预算，隔离在这里统一扣掉给 content
-  const confirmRows = pendingConfirm ? 5 : 0;                    // border 2 + 标题 1 + 摘要 1 + 提示 1
-  const activityRows = activity || streaming ? 3 : 0;            // border 2 + 内容 1
-  const slashOpen = promptDraft.startsWith("/") && !promptDraft.includes(" ");
-  const slashRows = slashOpen ? 9 : 0;                           // border 2 + 6 项 + hint 1
-  const HEADER_ROWS = 2;
-  const PROMPT_ROWS = 3;
-  const STATUS_ROWS = 2;
-  const contentRows = Math.max(
-    rows - HEADER_ROWS - PROMPT_ROWS - STATUS_ROWS - confirmRows - activityRows - slashRows,
-    3,
-  );
 
   const handleSubmit = (text: string) => {
     const handled = tryRunClientCommand(text, {
@@ -80,25 +64,24 @@ export function MainLayout({
     if (!handled) sendMessage(text);
   };
 
-  let contentArea: React.ReactElement;
+  // Overlay 类面板仍然在"屏幕上"弹出；此时隐藏 print-above 的消息区，
+  // 避免流式消息被面板遮挡产生错位。关闭面板后 Messages 重新挂载，
+  // Ink <Static> 会把已打印的 stable items 视为"已发射"不再重打，新的 pending
+  // 尾部继续流式。
+  let overlay: React.ReactElement | null = null;
   if (paletteOpen) {
-    contentArea = (
+    overlay = (
       <CommandPalette
         onClose={onCloseOverlays}
-        maxRows={contentRows}
         onExit={onExit}
         onOpenHistory={onOpenHistory}
         onOpenMemory={onOpenMemory}
       />
     );
   } else if (historyOpen) {
-    contentArea = <HistoryPanel onClose={onCloseOverlays} maxRows={contentRows} />;
+    overlay = <HistoryPanel onClose={onCloseOverlays} />;
   } else if (memoryOpen) {
-    contentArea = <MemoryPanel onClose={onCloseOverlays} maxRows={contentRows} />;
-  } else if (connected) {
-    contentArea = <Messages maxRows={contentRows - 1} />;
-  } else {
-    contentArea = <ConnectingIndicator />;
+    overlay = <MemoryPanel onClose={onCloseOverlays} />;
   }
 
   // 输入焦点和 SlashSuggestions 的激活条件保持与 PromptInput 一致
@@ -109,25 +92,24 @@ export function MainLayout({
     connected && !bootError && (!vim.enabled || vim.mode === "insert");
 
   return (
-    <Box
-      flexDirection="column"
-      width={cols}
-      height={rows}
-      overflow="hidden"
-    >
+    <Box flexDirection="column">
       <Header theme={theme} />
-      <Box
-        flexDirection="column"
-        flexGrow={1}
-        flexShrink={1}
-        minHeight={0}
-        overflow="hidden"
-      >
-        {contentArea}
-      </Box>
+      {overlay ? (
+        overlay
+      ) : connected ? (
+        <Messages />
+      ) : (
+        <ConnectingIndicator />
+      )}
       {pendingConfirm && <ConfirmBanner />}
       <ActivityBar />
-      <SlashSuggestions isActive={slashActive} onDismiss={() => { /* 由 store.promptDraft 变更自动重置 */ }} />
+      <SlashSuggestions
+        isActive={slashActive}
+        onDismiss={() => {
+          /* 由 store.promptDraft 变更自动重置 */
+        }}
+        onSelect={handleSubmit}
+      />
       <PromptInput
         onSubmit={handleSubmit}
         onCancel={cancel}
@@ -144,6 +126,8 @@ function Header({
   theme: ReturnType<typeof resolveTheme>;
 }): React.ReactElement {
   const agentInfo = useStore((s) => s.agentInfo);
+  const cwd = useStore((s) => s.workspaceCwd);
+  const short = cwd ? shortenPath(cwd) : "";
   return (
     <Box
       paddingX={1}
@@ -160,6 +144,12 @@ function Header({
           JimiAgent
         </Text>
         <Text color={theme.colors.textDim}> · React TUI</Text>
+        {short && (
+          <>
+            <Text color={theme.colors.textDim}>  · </Text>
+            <Text color={theme.colors.accent}>{short}</Text>
+          </>
+        )}
       </Box>
       <Box>
         {agentInfo && (
@@ -172,19 +162,44 @@ function Header({
   );
 }
 
+/**
+ * 把绝对路径简写：
+ *   - /Users/<user>/... → ~/...
+ *   - 其他保留原样
+ *   - 超过 48 字符时中间用 `…/` 截断，保留 tail
+ */
+function shortenPath(p: string): string {
+  const home = process.env.HOME;
+  let s = p;
+  if (home && s.startsWith(home)) s = "~" + s.slice(home.length);
+  if (s.length <= 48) return s;
+  const parts = s.split("/");
+  // 保留首段（~ 或 ""）和末 2 段
+  const head = parts[0] ?? "";
+  const tail = parts.slice(-2).join("/");
+  return `${head}/…/${tail}`;
+}
+
 function ConnectingIndicator(): React.ReactElement {
   const theme = resolveTheme(useStore((s) => s.theme));
   const bootError = useStore((s) => s.bootError);
   if (bootError) {
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" paddingX={1}>
         <Text color={theme.colors.error} bold>
           启动失败：
         </Text>
         <Text color={theme.colors.error}>{bootError}</Text>
-        <Box marginTop={1}>
+        <Box marginTop={1} flexDirection="column">
           <Text color={theme.colors.textDim}>
-            日志见 ~/.jimiagent/tui-worker.log
+            · 日志：<Text color={theme.colors.info}>~/.jimiagent/tui-worker.log</Text>
+          </Text>
+          <Text color={theme.colors.textDim}>
+            · 重试：按 <Text color={theme.colors.warning} bold>Ctrl+C</Text> 两次退出后重跑
+            {" "}<Text color={theme.colors.accent}>jimi chat</Text>
+          </Text>
+          <Text color={theme.colors.textDim}>
+            · 如果是 Python 环境问题，先 <Text color={theme.colors.info}>conda activate jimiAgent312</Text>
           </Text>
         </Box>
       </Box>

@@ -17,6 +17,12 @@ export interface SlashSuggestionsProps {
   isActive: boolean;
   /** 用户主动 Esc 关闭时触发；用于外层决定下次是否重新展示。 */
   onDismiss(): void;
+  /**
+   * Enter 时提交完整命令（例如 `/clear`）。
+   * 由 MainLayout 传入，走和普通消息一致的 submit 链路
+   * （`tryRunClientCommand` → client/server 命令或 agent）。
+   */
+  onSelect(text: string): void;
   /** 最多显示多少行候选（默认 6）。 */
   maxItems?: number;
 }
@@ -34,14 +40,19 @@ export interface SlashSuggestionsProps {
 export function SlashSuggestions({
   isActive,
   onDismiss,
+  onSelect,
   maxItems = 6,
 }: SlashSuggestionsProps): React.ReactElement | null {
   const theme = resolveTheme(useStore((s) => s.theme));
   const value = useStore((s) => s.promptDraft);
   const setValue = useStore((s) => s.setPromptDraft);
+  const setSlashSuggestRows = useStore((s) => s.setSlashSuggestRows);
   const [cursor, setCursor] = useState(0);
   const [serverItems, setServerItems] = useState<SlashSuggestion[]>([]);
   const [dismissed, setDismissed] = useState(false);
+  // 记忆上次用户选中的命令名；再次打开 / 且没有更具体的匹配时，把 cursor 恢复到它。
+  // 不跨 App 生命周期持久化（没必要，ref 足够）。
+  const lastPickedName = React.useRef<string | null>(null);
 
   // 只在从"非 /"切到"/"时重置 dismissed；typing 过程中不乱动
   const prevWasSlash = React.useRef(false);
@@ -49,17 +60,14 @@ export function SlashSuggestions({
     const isSlash = value.startsWith("/");
     if (isSlash && !prevWasSlash.current) {
       setDismissed(false);
-      setCursor(0);
+      // 不无条件清 cursor：先不动，等 filtered 算出来后在另一 effect 里定位到 lastPicked
     }
     prevWasSlash.current = isSlash;
   }, [value]);
 
-  // 首次进入 `/` 模式拉一次服务端命令
+  // 订阅 transport commands 事件：组件生命周期内只挂一次，避免重复订阅。
+  // 首次进入 `/` 模式时（serverItems 为空）触发 list_commands 请求。
   useEffect(() => {
-    if (!value.startsWith("/") || dismissed) return;
-    if (serverItems.length === 0) {
-      sendRequest({ kind: "list_commands" });
-    }
     const off = subscribeTransport((ev) => {
       if (ev.type === "commands") {
         setServerItems(
@@ -72,6 +80,13 @@ export function SlashSuggestions({
       }
     });
     return off;
+  }, []);
+
+  useEffect(() => {
+    if (!value.startsWith("/") || dismissed) return;
+    if (serverItems.length === 0) {
+      sendRequest({ kind: "list_commands" });
+    }
   }, [value, dismissed, serverItems.length]);
 
   const all = useMemo<SlashSuggestion[]>(() => {
@@ -112,19 +127,58 @@ export function SlashSuggestions({
     }
   }, [filtered.length, cursor]);
 
+  // 当面板刚打开且查询为空时，把 cursor 定位到上次用户选择过的命令（如果仍在列表里）。
+  // 仅在"从非 / 切到 /"时触发一次，避免输入过程被反复重置。
+  useEffect(() => {
+    if (!value.startsWith("/")) return;
+    const q = value.replace(/^\//, "").trim();
+    if (q.length > 0) return; // 用户已经开始筛，不覆盖
+    const name = lastPickedName.current;
+    if (!name) {
+      if (cursor !== 0) setCursor(0);
+      return;
+    }
+    const idx = filtered.findIndex((it) => it.name === name);
+    if (idx >= 0 && cursor !== idx) setCursor(idx);
+    // filtered 与 value 都在依赖里，但 filtered 依赖链里已经包含 value，所以只需依赖 filtered
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered]);
+
   const shown = value.startsWith("/") && !value.includes(" ") && !dismissed && isActive;
 
   useInput(
     (input, key) => {
       if (!shown) return;
-      if (filtered.length === 0) return;
+      // 无匹配命令时，不消费 Enter / Tab / 方向键，交给 PromptInput 的 TextInput
+      // 正常处理（用户可能想把 `/abc` 这种未知命令当作普通消息发出去）。
+      // Esc 仍然可以 dismiss 面板。
+      if (filtered.length === 0) {
+        if (key.escape) {
+          setDismissed(true);
+          onDismiss();
+        }
+        return;
+      }
       if (key.upArrow) {
         setCursor((c) => Math.max(0, c - 1));
       } else if (key.downArrow) {
         setCursor((c) => Math.min(filtered.length - 1, c + 1));
       } else if (key.tab) {
         const item = filtered[cursor];
-        if (item) setValue(item.name + " ");
+        if (item) {
+          lastPickedName.current = item.name;
+          setValue(item.name + " ");
+        }
+      } else if (key.return) {
+        // Enter：直接执行选中命令（不带参数）。
+        // 同一事件里 TextInput 也会触发 onSubmit，但 PromptInput 已约定对
+        // slash-only draft 走 no-op，所以这里独占 submit 链路。
+        const item = filtered[cursor];
+        if (item) {
+          lastPickedName.current = item.name;
+          setValue("");
+          onSelect(item.name);
+        }
       } else if (key.escape) {
         setDismissed(true);
         onDismiss();
@@ -134,10 +188,13 @@ export function SlashSuggestions({
     { isActive: shown },
   );
 
-  if (!shown) return null;
-  if (filtered.length === 0) return null;
-
-  // 以 cursor 为中心滑动窗口
+  // 计算实际渲染高度，提前写回 store 供 MainLayout 扣预算。
+  //   - 不显示时 rows = 0，Messages 区可占满
+  //   - 显示时 = border 2 + 可能的上/下提示 + items + hint 1
+  const visibleCount =
+    shown && filtered.length > 0
+      ? Math.min(filtered.length, maxItems)
+      : 0;
   const windowStart = Math.max(
     0,
     Math.min(
@@ -145,9 +202,23 @@ export function SlashSuggestions({
       filtered.length - maxItems,
     ),
   );
+  const hasAbove = shown && filtered.length > 0 && windowStart > 0;
+  const hasBelow =
+    shown && filtered.length > 0 && windowStart + maxItems < filtered.length;
+  const renderedRows =
+    visibleCount === 0
+      ? 0
+      : 2 /*border*/ + visibleCount + (hasAbove ? 1 : 0) + (hasBelow ? 1 : 0) + 1 /*hint*/;
+  // render 阶段调 setState 会被 React 警告，放到 effect 里。
+  useEffect(() => {
+    setSlashSuggestRows(renderedRows);
+    return () => setSlashSuggestRows(0);
+  }, [renderedRows, setSlashSuggestRows]);
+
+  if (!shown) return null;
+  if (filtered.length === 0) return null;
+
   const visible = filtered.slice(windowStart, windowStart + maxItems);
-  const hasAbove = windowStart > 0;
-  const hasBelow = windowStart + maxItems < filtered.length;
 
   return (
     <Box

@@ -11,13 +11,16 @@ function reset() {
     sessions: [],
     activity: null,
     activityLog: [],
-    viewOffset: 0,
     promptDraft: "",
+    slashSuggestRows: 0,
+    workspaceCwd: "",
     memories: [],
     memoryQuery: "",
     memoryLoading: false,
     memoryOpen: false,
     memorySelection: [],
+    selection: null,
+    overlayOwnsEscape: false,
   }));
 }
 
@@ -122,32 +125,6 @@ describe("state/store", () => {
     s.endActivity("error", "timeout");
     expect(useStore.getState().activityLog[0]?.kind).toBe("error");
     expect(useStore.getState().activityLog[0]?.label).toContain("timeout");
-  });
-
-  it("scrollBy 有边界裁剪", () => {
-    const s = useStore.getState();
-    for (let i = 0; i < 3; i++) {
-      s.appendMessage({
-        id: `m${i}`,
-        role: "user",
-        content: `msg ${i}`,
-        createdAt: Date.now(),
-      });
-    }
-    s.scrollBy(10);
-    expect(useStore.getState().viewOffset).toBe(2); // 3-1
-    s.scrollBy(-999);
-    expect(useStore.getState().viewOffset).toBe(0);
-  });
-
-  it("scrollToBottom / scrollToTop", () => {
-    const s = useStore.getState();
-    s.appendMessage({ id: "a", role: "user", content: "x", createdAt: 0 });
-    s.appendMessage({ id: "b", role: "user", content: "y", createdAt: 0 });
-    s.scrollToTop();
-    expect(useStore.getState().viewOffset).toBe(1);
-    s.scrollToBottom();
-    expect(useStore.getState().viewOffset).toBe(0);
   });
 
   it("setPromptDraft 更新 draft", () => {
@@ -266,16 +243,71 @@ describe("state/store", () => {
     expect(useStore.getState().memorySelection).toEqual([]);
   });
 
-  it("clearMessages 同时重置 activity 与 viewOffset", () => {
+  it("clearMessages 同时重置 activity", () => {
     const s = useStore.getState();
     s.appendMessage({ id: "a", role: "user", content: "x", createdAt: 0 });
     s.beginActivity("tool", "t");
-    s.setViewOffset(1);
     s.clearMessages();
     const st = useStore.getState();
     expect(st.messages).toHaveLength(0);
     expect(st.activity).toBeNull();
     expect(st.activityLog).toHaveLength(0);
-    expect(st.viewOffset).toBe(0);
+  });
+
+  it("enterSelection 锚点落在合法范围", () => {
+    const s = useStore.getState();
+    for (let i = 0; i < 3; i++) {
+      s.appendMessage({
+        id: `m${i}`,
+        role: "user",
+        content: `t${i}`,
+        createdAt: 0,
+      });
+    }
+    s.enterSelection(99); // 超界 → 裁剪到末尾
+    const sel = useStore.getState().selection;
+    expect(sel).not.toBeNull();
+    expect(sel!.anchor).toBe(2);
+    expect(sel!.head).toBe(2);
+  });
+
+  it("enterSelection 空消息不创建 selection", () => {
+    const s = useStore.getState();
+    s.enterSelection(0);
+    expect(useStore.getState().selection).toBeNull();
+  });
+
+  it("moveSelectionHead 扩/缩 + 边界裁剪", () => {
+    const s = useStore.getState();
+    for (let i = 0; i < 5; i++) {
+      s.appendMessage({
+        id: `m${i}`,
+        role: "user",
+        content: "x",
+        createdAt: 0,
+      });
+    }
+    s.enterSelection(2);
+    s.moveSelectionHead(+5); // 4
+    expect(useStore.getState().selection?.head).toBe(4);
+    s.moveSelectionHead(-10); // 0
+    expect(useStore.getState().selection?.head).toBe(0);
+    // anchor 保持
+    expect(useStore.getState().selection?.anchor).toBe(2);
+  });
+
+  it("clearSelection 把 selection 置 null", () => {
+    const s = useStore.getState();
+    s.appendMessage({ id: "a", role: "user", content: "x", createdAt: 0 });
+    s.enterSelection(0);
+    expect(useStore.getState().selection).not.toBeNull();
+    s.clearSelection();
+    expect(useStore.getState().selection).toBeNull();
+  });
+
+  it("moveSelectionHead 在未激活时无副作用", () => {
+    const s = useStore.getState();
+    s.moveSelectionHead(+3);
+    expect(useStore.getState().selection).toBeNull();
   });
 });

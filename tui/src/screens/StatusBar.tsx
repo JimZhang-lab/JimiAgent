@@ -16,6 +16,11 @@ export function StatusBar(): React.ReactElement {
   const connected = useStore((s) => s.connected);
   const streaming = useStore((s) => s.streaming);
   const vim = useStore((s) => s.vim);
+  const focus = useStore((s) => s.focus);
+  const selection = useStore((s) => s.selection);
+  const paletteOpen = useStore((s) => s.paletteOpen);
+  const historyOpen = useStore((s) => s.historyOpen);
+  const memoryOpen = useStore((s) => s.memoryOpen);
 
   const left: React.ReactNode[] = [];
   if (session) {
@@ -64,6 +69,41 @@ export function StatusBar(): React.ReactElement {
   }
 
   const right: React.ReactNode[] = [];
+
+  // 焦点/选区徽标（最左的 right 元素）。中文短标签保持与 UI 其它部分一致。
+  let focusLabel = "";
+  let focusColor = theme.colors.textDim;
+  if (selection) {
+    const n = Math.abs(selection.head - selection.anchor) + 1;
+    focusLabel = `选区 ${n}`;
+    focusColor = theme.colors.accent;
+  } else if (paletteOpen) {
+    focusLabel = "命令面板";
+    focusColor = theme.colors.info;
+  } else if (historyOpen) {
+    focusLabel = "会话列表";
+    focusColor = theme.colors.info;
+  } else if (memoryOpen) {
+    focusLabel = "记忆管理";
+    focusColor = theme.colors.info;
+  } else if (focus === "messages") {
+    focusLabel = "消息区";
+    focusColor = theme.colors.primary;
+  } else if (focus === "prompt") {
+    focusLabel = "输入区";
+    focusColor = theme.colors.primary;
+  }
+  if (focusLabel) {
+    right.push(
+      <Text key="focus" color={focusColor} bold>
+        {focusLabel}
+      </Text>,
+      <Text key="focusSep" color={theme.colors.textDim}>
+        {"  "}
+      </Text>,
+    );
+  }
+
   if (streaming) {
     right.push(
       <Text key="stream" color={theme.colors.primary} bold>
@@ -81,9 +121,15 @@ export function StatusBar(): React.ReactElement {
         : vim.mode === "visual"
           ? theme.colors.warning
           : theme.colors.success;
+    const label =
+      vim.mode === "normal"
+        ? "VIM·常规"
+        : vim.mode === "visual"
+          ? "VIM·可视"
+          : "VIM·插入";
     right.push(
       <Text key="vim" color={color} bold>
-        {vim.mode.toUpperCase()}
+        {label}
       </Text>,
       <Text key="vimSep" color={theme.colors.textDim}>
         {"  "}

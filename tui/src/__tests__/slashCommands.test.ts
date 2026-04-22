@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { tryRunClientCommand } from "../utils/slashCommands.js";
 import { useStore } from "../state/store.js";
@@ -109,5 +112,68 @@ describe("utils/slashCommands", () => {
     const ctx = makeCtx();
     expect(tryRunClientCommand("/mem", ctx)).toBe(true);
     expect(ctx.openMemory).toHaveBeenCalledOnce();
+  });
+
+  it("/cwd 输出 workspace 与 user cwd", () => {
+    useStore.getState().setWorkspaceCwd("/tmp/workspace");
+    tryRunClientCommand("/cwd", makeCtx());
+    const msg = useStore.getState().messages.at(-1);
+    expect(msg?.role).toBe("system");
+    expect(msg?.content).toContain("/tmp/workspace");
+    expect(msg?.content).toContain("工作目录");
+  });
+
+  it("/open 无匹配时提示", () => {
+    tryRunClientCommand("/open", makeCtx());
+    const msg = useStore.getState().messages.at(-1);
+    expect(msg?.content).toContain("没有可识别的 URL");
+  });
+
+  it("/open 无参数时列出所有 URL", () => {
+    useStore.getState().appendMessage({
+      id: "m1",
+      role: "assistant",
+      content: "看下 https://example.com 和 https://foo.bar/baz 这两个",
+      createdAt: Date.now(),
+    });
+    tryRunClientCommand("/open", makeCtx());
+    const msg = useStore.getState().messages.at(-1);
+    expect(msg?.content).toMatch(/\[1\] https:\/\/example\.com/);
+    expect(msg?.content).toMatch(/\[2\] https:\/\/foo\.bar\/baz/);
+  });
+
+  it("/export 写入到指定路径", () => {
+    useStore.getState().appendMessage({
+      id: "u",
+      role: "user",
+      content: "你好",
+      createdAt: Date.now(),
+    });
+    useStore.getState().appendMessage({
+      id: "a",
+      role: "assistant",
+      content: "你好呀",
+      createdAt: Date.now(),
+    });
+    const target = path.join(os.tmpdir(), `jimi-export-test-${Date.now()}.md`);
+    tryRunClientCommand(`/export ${target}`, makeCtx());
+    expect(fs.existsSync(target)).toBe(true);
+    const content = fs.readFileSync(target, "utf8");
+    expect(content).toContain("你好");
+    expect(content).toContain("你好呀");
+    fs.unlinkSync(target);
+  });
+
+  it("/save 作为 /export 别名", () => {
+    useStore.getState().appendMessage({
+      id: "u",
+      role: "user",
+      content: "hi",
+      createdAt: Date.now(),
+    });
+    const target = path.join(os.tmpdir(), `jimi-save-test-${Date.now()}.md`);
+    tryRunClientCommand(`/save ${target}`, makeCtx());
+    expect(fs.existsSync(target)).toBe(true);
+    fs.unlinkSync(target);
   });
 });

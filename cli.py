@@ -68,25 +68,9 @@ def start(host, port, verbose):
 
 @cli.command()
 @click.option("--session", "-s", default=None, help="恢复指定会话 ID")
-@click.option(
-    "--classic",
-    is_flag=True,
-    hidden=True,
-    help="使用旧版 rich.live TUI（临时保留，下一版本移除）",
-)
-def chat(session, classic):
-    """终端交互式对话（React + Ink TUI；--classic 使用旧版）"""
-    from server.config.settings import get_settings
-    from server.config.logging_setup import setup_from_settings
-
-    if classic:
-        # 临时 fallback；下一版本删除
-        from server.core.tui import run_chat
-        setup_from_settings(get_settings())
-        asyncio.run(run_chat(session))
-        return
-
-    # 新 React/Ink TUI：spawn Node 子进程接管 TTY
+def chat(session):
+    """终端交互式对话（React + Ink TUI）"""
+    # React/Ink TUI：spawn Node 子进程接管 TTY
     import shutil
     from pathlib import Path
 
@@ -96,16 +80,15 @@ def chat(session, classic):
 
     if node is None:
         console.print(
-            "[red]未找到 Node.js[/red]。新 TUI 需要 Node 20+。\n"
-            "[dim]安装 Node 后再试，或临时使用 `python cli.py chat --classic` 走旧版。[/dim]"
+            "[red]未找到 Node.js[/red]。TUI 需要 Node 20+。\n"
+            "[dim]请安装 Node 后再试。[/dim]"
         )
         raise SystemExit(1)
 
     if not cli_js.exists():
         console.print(
             "[red]未找到 tui/dist/cli.js[/red]。请先构建：\n"
-            "  [cyan]yarn --cwd tui install && yarn --cwd tui build[/cyan]\n"
-            "[dim]或临时使用 `python cli.py chat --classic` 走旧版。[/dim]"
+            "  [cyan]yarn --cwd tui install && yarn --cwd tui build[/cyan]"
         )
         raise SystemExit(1)
 
@@ -120,6 +103,12 @@ def chat(session, classic):
     # 关键：用当前解释器（例如 conda env 下的 python），而不是 Node 端 PATH 里的第一个 python
     if not env.get("JIMI_TUI_WORKER_CMD"):
         env["JIMI_TUI_WORKER_CMD"] = f"{sys.executable} -m server.core.tui_worker"
+
+    # 把用户启动 `jimi chat` 时的 cwd 透传给 worker，
+    # 这样 list_dir(".") / "当前文件夹" 语义才对齐用户直觉。
+    # Node TUI 会把 worker 的 cwd 设成 project root（为了 server.core 可导入），
+    # 故无法靠 Python 的 os.getcwd() 从 worker 里反推。
+    env["JIMI_USER_CWD"] = os.getcwd()
 
     # execvp：让 Node 接管 TTY 与信号；当前 Python 进程被替换
     os.execvpe(node, [node, str(cli_js)], env)
@@ -1025,7 +1014,6 @@ def doctor():
         ("FastAPI", "fastapi"),
         ("Uvicorn", "uvicorn"),
         ("aiosqlite", "aiosqlite"),
-        ("prompt_toolkit", "prompt_toolkit"),
         ("croniter", "croniter"),
         ("ruamel.yaml", "ruamel.yaml"),
     ]:

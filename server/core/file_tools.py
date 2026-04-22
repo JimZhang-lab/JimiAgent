@@ -16,6 +16,7 @@ Description: 全盘文件与 Shell 内置工具。
 - `settings.safety.enabled=False`：兼容老行为（workspace-only 白名单）
 '''
 import logging
+import os
 import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -105,6 +106,21 @@ def _ui_interrupt_confirm(payload: dict) -> bool:
 
 def _workspace(agent: "JimiAgent") -> Path:
     return agent.settings.workspace_abs_path
+
+
+def user_cwd() -> Path:
+    """返回用户启动 `jimi chat` 时的 cwd（由 cli.py 透传 JIMI_USER_CWD）。
+
+    若环境变量缺失（例如通过 `python cli.py start` 跑 gateway 或测试），
+    则回退到进程 os.getcwd()。对 TUI 下的 `list_dir(".")` 与"当前目录"
+    语义至关重要——否则 LLM 会把 workspace 误当作用户 CWD。
+    """
+    env = os.environ.get("JIMI_USER_CWD")
+    if env:
+        p = Path(env)
+        if p.exists() and p.is_dir():
+            return p.resolve()
+    return Path(os.getcwd()).resolve()
 
 
 def _extra_path_deny(agent: "JimiAgent") -> list[str]:
@@ -374,10 +390,12 @@ def build_file_tools(agent: "JimiAgent") -> list[StructuredTool]:
     def list_dir(path: str = ".", max_items: int = 50) -> str:
         """列出目录中的文件和子目录。
 
-        支持全盘路径。无 path 时默认 workspace 根目录。
+        - `path="."` 或不传：默认"用户当前目录"（启动 `jimi chat` 的 cwd，
+          由 JIMI_USER_CWD 透传），对应用户直觉；不是 workspace！
+        - 其它：支持全盘路径，受 safety 规则限制。
         """
-        if path == ".":
-            p = _workspace(agent)
+        if path in (".", "", None):
+            p = user_cwd()
         else:
             ok, err, p = _check_path_read(agent, path)
             if not ok:
@@ -405,6 +423,14 @@ def build_file_tools(agent: "JimiAgent") -> list[StructuredTool]:
         if len(items) > max_items:
             lines.append(f"  ... 还有 {len(items) - max_items} 项未显示")
         return "\n".join(lines)
+
+    def get_cwd() -> str:
+        """返回用户的当前工作目录。
+
+        即启动 `jimi chat` 时所在的目录。用户说「当前文件夹」「这里」「此目录」
+        时都指这个，**不是 workspace**。在不确定路径时优先调用本工具确认。
+        """
+        return str(user_cwd())
 
     return [
         StructuredTool.from_function(
@@ -437,8 +463,17 @@ def build_file_tools(agent: "JimiAgent") -> list[StructuredTool]:
             func=list_dir,
             name="list_dir",
             description=(
-                "列出目录中的文件和子目录。默认 workspace 根目录；"
+                "列出目录中的文件和子目录。"
+                "**path='.' 或不传 = 用户当前目录**（启动 jimi 时的 cwd）；"
                 "可传任意路径。系统保护目录会被拒绝。"
+            ),
+        ),
+        StructuredTool.from_function(
+            func=get_cwd,
+            name="get_cwd",
+            description=(
+                "返回用户的当前工作目录（启动 jimi chat 时的 cwd）。"
+                "用户说「当前文件夹」「这里」「此目录」时指这个，不是 workspace。"
             ),
         ),
     ]

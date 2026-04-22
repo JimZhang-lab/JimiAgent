@@ -23,10 +23,12 @@ export function ActivityBar(): React.ReactElement | null {
   const streaming = useStore((s) => s.streaming);
   const [, tick] = React.useReducer((x: number) => x + 1, 0);
 
-  // 每 500ms 重绘一次，用于刷新 elapsed
+  // 每 1s 重绘一次，用于刷新 elapsed 字样。
+  // 原本 500ms 对 elapsed 文本只有"整数秒"变化时才有视觉增益，多余的那一半
+  // tick 会白白触发整棵树 diff（Ink 的 renderer 在消息列表很长时开销显著）。
   React.useEffect(() => {
     if (!activity) return;
-    const t = setInterval(tick, 500);
+    const t = setInterval(tick, 1000);
     return () => clearInterval(t);
   }, [activity]);
 
@@ -48,6 +50,14 @@ export function ActivityBar(): React.ReactElement | null {
     activity?.label ?? (streaming ? "生成回复中" : "");
   const elapsed = activity ? Date.now() - activity.since : 0;
   const elapsedStr = formatElapsed(elapsed);
+  // thinking 态长时间无 chunk 时附加"慢响应"提示，降低"是不是卡死"焦虑。
+  // 3s 起提示；tool/confirm 不加（工具自身 label 已有足够信息）。
+  const slowHint =
+    activity?.kind === "thinking" && elapsed >= 3000
+      ? elapsed >= 15000
+        ? "  ⏱ 仍在等待模型响应…可按 Ctrl+C 取消"
+        : "  ⏱ 等待模型响应…"
+      : "";
 
   return (
     <Box
@@ -65,6 +75,7 @@ export function ActivityBar(): React.ReactElement | null {
         <Text bold>{label}</Text>
       </Text>
       <Text color={theme.colors.textDim}> · {elapsedStr}</Text>
+      {slowHint && <Text color={theme.colors.warning}>{slowHint}</Text>}
     </Box>
   );
 }

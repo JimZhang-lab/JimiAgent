@@ -35,6 +35,5 @@ pyyaml>=6.0
 click>=8.1.0
 rich>=14.0.0
 httpx>=0.28.0
-prompt_toolkit>=3.0.0
 croniter>=2.0
 ruamel.yaml>=0.18

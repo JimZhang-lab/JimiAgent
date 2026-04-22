@@ -1,13 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import TextInput from "ink-text-input";
+import { SmartTextInput } from "../components/SmartTextInput.js";
 import { useStore } from "../state/store.js";
 import { resolveTheme } from "../themes/index.js";
 import { sendRequest } from "../state/wiring.js";
+import { useScopedBindings } from "../keybindings/useKeybinding.js";
 
 export interface MemoryPanelProps {
   onClose(): void;
-  maxRows: number;
 }
 
 type Mode = "list" | "search";
@@ -22,10 +22,12 @@ type Mode = "list" | "search";
  */
 export function MemoryPanel({
   onClose: _onClose,
-  maxRows,
 }: MemoryPanelProps): React.ReactElement {
   const theme = resolveTheme(useStore((s) => s.theme));
   const memories = useStore((s) => s.memories);
+  // 面板自读终端高度，保留 10 行给底部动态 UI
+  const termRows = useStore((s) => s.dims.rows);
+  const maxRows = Math.max(10, termRows - 10);
   const loading = useStore((s) => s.memoryLoading);
   const currentQuery = useStore((s) => s.memoryQuery);
   const setMemoryLoading = useStore((s) => s.setMemoryLoading);
@@ -42,6 +44,30 @@ export function MemoryPanel({
   const [mode, setMode] = useState<Mode>("list");
   const [searchDraft, setSearchDraft] = useState(currentQuery);
   const [kindFilter, setKindFilter] = useState<string>("all");
+  /** 批量删除进行中的剩余计数；0 表示空闲。用于面板底部显示进度。 */
+  const [bulkPending, setBulkPending] = useState(0);
+  const setOverlayOwnsEscape = useStore((s) => s.setOverlayOwnsEscape);
+
+  // 把"是否有子模式占用 Esc"同步给全局 Esc 处理器。
+  // - search 模式：Esc 退回列表，不能让 App 把整个面板关掉
+  // - pendingDelete / pendingBulk：Esc 取消确认态，不能让 App 关面板
+  useEffect(() => {
+    const owns = mode === "search" || pendingDelete !== null || pendingBulk;
+    setOverlayOwnsEscape(owns);
+    return () => setOverlayOwnsEscape(false);
+  }, [mode, pendingDelete, pendingBulk, setOverlayOwnsEscape]);
+
+  useScopedBindings("overlay-memory", [
+    { key: "up/down", description: "上/下移光标" },
+    { key: "return", description: "展开/收起详情；批量模式下确认删除" },
+    { key: "space", description: "切换当前项多选" },
+    { key: "a", description: "全选当前过滤结果" },
+    { key: "A", description: "清空选择" },
+    { key: "d", description: "进入删除预备态" },
+    { key: "r", description: "刷新列表或重跑当前查询" },
+    { key: "/", description: "进入搜索模式" },
+    { key: "k", description: "循环切换 kind 过滤器" },
+  ]);
 
   // 首次打开：拉最近
   useEffect(() => {
@@ -80,6 +106,13 @@ export function MemoryPanel({
         // TextInput 处理其他按键
         return;
       }
+      // list 模式下 Esc：先取消待删除态；待删除为 null 时交回全局 Esc 关面板
+      if (key.escape) {
+        if (pendingBulk || pendingDelete !== null) {
+          resetDeletePending();
+        }
+        return;
+      }
       if (key.upArrow) {
         setCursor((c) => Math.max(0, c - 1));
         resetDeletePending();
@@ -89,12 +122,25 @@ export function MemoryPanel({
         resetDeletePending();
         setExpanded(false);
       } else if (key.return) {
-        // 批量删除确认优先
+        // 批量删除确认优先。
+        // 把请求节流到每 50ms 一个，避免 worker 端一次收到上百条请求后阻塞事件循环。
+        // 同时记下剩余计数，status bar 会显示进度。
         if (pendingBulk && selection.length > 0) {
-          for (const id of selection) {
-            sendRequest({ kind: "delete_memory", memory_id: id });
-          }
+          const queue = [...selection];
+          setBulkPending(queue.length);
           setPendingBulk(false);
+          clearSelection();
+          const drain = () => {
+            const id = queue.shift();
+            if (id === undefined) {
+              setBulkPending(0);
+              return;
+            }
+            sendRequest({ kind: "delete_memory", memory_id: id });
+            setBulkPending(queue.length);
+            setTimeout(drain, 50);
+          };
+          drain();
           return;
         }
         const m = filtered[cursor];
@@ -194,7 +240,7 @@ export function MemoryPanel({
           paddingX={1}
         >
           <Text color={theme.colors.primary}>🔍 </Text>
-          <TextInput
+          <SmartTextInput
             value={searchDraft}
             onChange={setSearchDraft}
             onSubmit={(q) => {
@@ -261,7 +307,11 @@ export function MemoryPanel({
       )}
 
       <Box marginTop={1} flexDirection="column">
-        {pendingBulk && selection.length > 0 ? (
+        {bulkPending > 0 ? (
+          <Text color={theme.colors.warning} bold>
+            ⟲ 正在批量删除…剩余 {bulkPending} 条
+          </Text>
+        ) : pendingBulk && selection.length > 0 ? (
           <Text color={theme.colors.error} bold>
             ⚠️ 按 Enter 确认删除已选 {selection.length} 条；按 ↑/↓ 或 A 取消
           </Text>

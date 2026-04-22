@@ -26,10 +26,16 @@ export function ConfirmBanner(): React.ReactElement | null {
 
   if (!pending) return null;
 
+  const payload = pending.payload ?? {};
   const summary =
-    (typeof pending.payload?.summary === "string"
-      ? pending.payload.summary
-      : JSON.stringify(pending.payload)) ?? "请求确认";
+    typeof payload.summary === "string"
+      ? payload.summary
+      : JSON.stringify(payload);
+  // detail 可能是任意形状的对象，投影为 key=value 行。string 直接用，
+  // 其他类型 JSON.stringify 再截断，避免一行太长撑爆布局。
+  const detail = payload.detail && typeof payload.detail === "object"
+    ? (payload.detail as Record<string, unknown>)
+    : null;
 
   return (
     <Box
@@ -42,10 +48,43 @@ export function ConfirmBanner(): React.ReactElement | null {
         ⚠ 等待确认
       </Text>
       <Text color={theme.colors.text}>{summary}</Text>
+      {detail && Object.keys(detail).length > 0 && (
+        <Box flexDirection="column" marginTop={0}>
+          {Object.entries(detail).slice(0, 6).map(([k, v]) => (
+            <Text key={k} color={theme.colors.textDim}>
+              <Text color={theme.colors.info}>{k}</Text>
+              {": "}
+              <Text color={theme.colors.text}>{formatDetailValue(v)}</Text>
+            </Text>
+          ))}
+          {Object.keys(detail).length > 6 && (
+            <Text color={theme.colors.textDim} italic>
+              …还有 {Object.keys(detail).length - 6} 项
+            </Text>
+          )}
+        </Box>
+      )}
       <Text color={theme.colors.textDim}>
-        按 <Text color={theme.colors.success} bold>y</Text> 允许 ·{" "}
-        <Text color={theme.colors.error} bold>n</Text> 拒绝
+        按 <Text color={theme.colors.success} bold>[y]</Text> 允许 /{" "}
+        <Text color={theme.colors.error} bold>[n]</Text> 拒绝
       </Text>
     </Box>
   );
+}
+
+/** 把 detail 值压平成一行文本，过长则截断保留前 120 字符。 */
+function formatDetailValue(v: unknown): string {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === "string") return shrink(v);
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  try {
+    return shrink(JSON.stringify(v));
+  } catch {
+    return "(unprintable)";
+  }
+}
+
+function shrink(s: string): string {
+  const flat = s.replace(/\s+/g, " ");
+  return flat.length > 120 ? flat.slice(0, 117) + "…" : flat;
 }

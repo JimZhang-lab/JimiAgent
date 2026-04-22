@@ -49,6 +49,7 @@ jimi chat --classic          # 紧急回退旧 rich.live TUI（下一版本移�
 - `/sessions` — 打开会话列表
 - `/memory` | `/mem` — 打开记忆管理面板（浏览 / 搜索 / 删除跨会话长期记忆）
 - `/palette` — 打开命令面板
+- `/keys` — 列出所有已注册键位（按 scope 分组）
 - `/theme dark|light|auto`
 - `/copy` — 复制最后一条 assistant 内容到系统剪贴板
 - `/vim [on|off]` — 切换 Vim 模式
@@ -60,7 +61,8 @@ jimi chat --classic          # 紧急回退旧 rich.live TUI（下一版本移�
 | **Ctrl+P** | 命令面板（fuzzy 搜 client + server 命令） |
 | **Ctrl+S** | 会话列表 |
 | **Ctrl+M** | 记忆管理面板 |
-| **Esc** | 关闭弹层 / 关闭 slash 补全 |
+| **Tab / Shift+Tab** | 切换焦点 prompt ↔ messages |
+| **Esc** | 关闭弹层 / 退出选区 / 归位到 prompt |
 | **Ctrl+C** | 取消生成 / 关闭弹层 / 退出 |
 | **PgUp / PgDn** | 消息列表上/下翻 5 行 |
 | **Ctrl+U / Ctrl+D** | 上/下翻 10 条 |
@@ -70,6 +72,15 @@ jimi chat --classic          # 紧急回退旧 rich.live TUI（下一版本移�
 **命令面板**：`fuse.js` 模糊匹配；↑/↓ 选择，Enter 执行；服务端命令来自 worker 的 `list_commands`。
 
 **会话列表**：显示所有会话（当前高亮●），↑/↓ 选中，**Enter** 切换；**n** 新建；**d → Enter** 确认删除。
+
+**消息区选区**（类 Vim visual mode）：
+
+- 进入条件：焦点在 messages（Tab 切换），或 Vim 已开启且在 normal 模式
+- **v** — 进入选区，锚点落在最新一条消息
+- **↑/k** / **↓/j** — 扩大/缩小选区
+- **y** — 把选区内所有消息拼成纯文本拷到系统剪贴板
+- **Esc** — 退出选区
+- 选区内的消息左侧显示 `▌` 强调色竖条；StatusBar 同步显示 `VISUAL N`
 
 **记忆管理**（`/memory` 或 Ctrl+M）：
 

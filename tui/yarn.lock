@@ -1865,14 +1865,6 @@ ink-testing-library@^4.0.0:
   resolved "https://registry.npmmirror.com/ink-testing-library/-/ink-testing-library-4.0.0.tgz#7071dac9a3d783e7bab2ee05fdf1d01a2cd3bb0d"
   integrity sha512-yF92kj3pmBvk7oKbSq5vEALO//o7Z9Ck/OaLNlkzXNeYdwfpxMQkSowGTFUCS5MSu9bWfSZMewGpp7bFc66D7Q==
 
-ink-text-input@^6.0.0:
-  version "6.0.0"
-  resolved "https://registry.npmmirror.com/ink-text-input/-/ink-text-input-6.0.0.tgz#71bdfacbfd161fbaff88bb8ca6b3a55dbc3d36e0"
-  integrity sha512-Fw64n7Yha5deb1rHY137zHTAbSTNelUKuB5Kkk2HACXEtwIHBCf9OH2tP/LQ9fRYTl1F0dZgbW0zPnZk6FA9Lw==
-  dependencies:
-    chalk "^5.3.0"
-    type-fest "^4.18.2"
-
 ink@^5.0.1:
   version "5.2.1"
   resolved "https://registry.npmmirror.com/ink/-/ink-5.2.1.tgz#b9ea59f0d1eab2b4566903b35b54fd34323d1694"
@@ -3257,7 +3249,7 @@ type-fest@^0.20.2:
   resolved "https://registry.npmmirror.com/type-fest/-/type-fest-0.20.2.tgz#1bf207f4b28f91583666cb5fbd327887301cd5f4"
   integrity sha512-Ne+eE4r0/iWnpAxD852z3A+N0Bt5RN//NjJwRd2VFHEmrywxf5vsZlh4R6lixl6B+wz/8d+maTSAkN1FIkI3LQ==
 
-type-fest@^4.18.2, type-fest@^4.27.0:
+type-fest@^4.27.0:
   version "4.41.0"
   resolved "https://registry.npmmirror.com/type-fest/-/type-fest-4.41.0.tgz#6ae1c8e5731273c2bf1f58ad39cbae2c91a46c58"
   integrity sha512-TeTSQ6H5YHvpqVwBRcnLDCBnDOHWYu7IvGbHT6N8AOymcr9PJGjc1GTtiWZTYg0NCgYwvnYWEkVChQAr9bjfwA==

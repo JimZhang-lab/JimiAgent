@@ -39,6 +39,44 @@ WORKER_VERSION = "0.1.0"
 
 
 # ============================================================================
+# 斜杠命令清单（原 `server/core/tui.py` 的 SLASH_COMMANDS，迁入本模块作为
+# 唯一数据源；旧 rich.live TUI 已下线）
+# 顺序即补全列表顺序。
+# ============================================================================
+
+SLASH_COMMANDS: dict[str, str] = {
+    "/help":         "显示所有可用命令",
+    "/status":       "系统与当前会话状态",
+    "/new":          "新建会话 [/new <title>]",
+    "/sessions":     "列出历史会话",
+    "/skills":       "列出技能",
+    "/reset":        "清空当前会话历史",
+    "/compact":      "手动压缩上下文",
+    "/think":        "推理深度 [low|medium|high]",
+    "/verbose":      "详细输出 [on|off]",
+    "/trace":        "LangGraph 事件 [on|off]",
+    "/usage":        "token 统计 [off|tokens|full]",
+    "/activation":   "激活策略 [mention|always]",
+    "/bash_confirm": "bash 写命令二次确认 [on|off]",
+    "/config":       "读/写 yaml 配置 [/config <key> [value]]",
+    "/model":        "切换主模型 [/model <id>]",
+    "/reload":       "重读 yaml 并清缓存",
+    "/edit":         "在 $EDITOR 中编辑 yaml",
+    "/restart":      "重建 Skills 索引",
+    "/memories":     "列出跨会话长期记忆",
+    "/recall":       "检索记忆 [/recall <query>]",
+    "/recall_at":    "时间三元组查询 [/recall_at <ts>]",
+    "/forget":       "删除记忆 [/forget <id>]",
+    "/plugin":       "OpenClaw 插件管理 (list|show|enable|disable|install|uninstall|doctor)",
+    "/computer_use": "AI 操控电脑开关 (on|off|status / desktop|browser|loop on|off)",
+    "/clear":        "清屏",
+    "/quit":         "退出",
+    "/exit":         "退出",
+    "/q":            "退出",
+}
+
+
+# ============================================================================
 # 输出：单例锁 + 行缓冲 flush
 # ============================================================================
 
@@ -236,11 +274,6 @@ async def handle_list_sessions(state: WorkerState, req: dict) -> None:
 
 
 async def handle_list_commands(state: WorkerState, req: dict) -> None:
-    # 复用旧 tui.py 里的斜杠命令字典（单一数据源）
-    try:
-        from server.core.tui import SLASH_COMMANDS
-    except Exception:
-        SLASH_COMMANDS = {}
     items = [{"name": k, "description": v} for k, v in SLASH_COMMANDS.items()]
     await emit({
         "type": "commands",
@@ -249,9 +282,88 @@ async def handle_list_commands(state: WorkerState, req: dict) -> None:
     })
 
 
+async def _emit_history_for(
+    state: WorkerState,
+    session_id: str,
+    req_id: Optional[str] = None,
+) -> None:
+    """读取 checkpointer 中会话的消息列表，转成一条 `history` 事件发送。
+
+    用于会话切换 / 首次进入时把历史消息"回放"到前端，配合 Ink <Static>
+    print-above 架构，历史对话会直接落到终端 scrollback 里供原生滚动查看。
+
+    消息角色映射（langchain_core.messages → 前端 MessageRole）：
+      - HumanMessage  → user
+      - AIMessage     → assistant（content 为空且仅有 tool_calls 的会被跳过）
+      - ToolMessage   → tool（content 前置"调用工具: <name>"）
+      - SystemMessage → system
+
+    读取失败 / 无历史时仍发送空 items 的 history 事件，让前端清晰知道
+    "回放完毕但无内容"，避免加载动画卡住。
+    """
+    from langchain_core.messages import (
+        AIMessage,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+    )
+
+    items: list[dict] = []
+    try:
+        graph = state.agent._get_state_graph()
+        config = {"configurable": {"thread_id": session_id}}
+        snapshot = await graph.aget_state(config)
+        messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+    except Exception as e:
+        logger.warning("读取会话 %s 历史失败: %s", session_id, e)
+        messages = []
+
+    for msg in messages:
+        content = getattr(msg, "content", "") or ""
+        if not isinstance(content, str):
+            # ContentBlocks（多模态）压成纯文本粗略展示；print-above 架构
+            # 不处理 inline 图片，后续可扩展
+            try:
+                content = json.dumps(content, ensure_ascii=False)
+            except Exception:
+                content = str(content)
+
+        tool_name: Optional[str] = None
+        if isinstance(msg, HumanMessage):
+            role = "user"
+        elif isinstance(msg, AIMessage):
+            role = "assistant"
+            # 空 content 的 AIMessage 一般是纯 tool_call 决策，不对用户有价值，跳过
+            if not content.strip():
+                continue
+        elif isinstance(msg, ToolMessage):
+            role = "tool"
+            tool_name = getattr(msg, "name", None) or None
+            if tool_name:
+                content = f"调用工具: {tool_name}\n{content}".rstrip()
+        elif isinstance(msg, SystemMessage):
+            role = "system"
+        else:
+            # 未知类型，保守当 system
+            role = "system"
+
+        item: dict = {"role": role, "content": content}
+        if tool_name:
+            item["tool_name"] = tool_name
+        items.append(item)
+
+    await emit({
+        "type": "history",
+        "session_id": session_id,
+        "items": items,
+        "req_id": req_id,
+    })
+
+
 async def handle_switch_session(state: WorkerState, req: dict) -> None:
-    # 单纯 ACK；真实切换在 Node 侧
+    # 发 session ACK + 回放历史消息，让前端能把整段对话写入 scrollback
     session_id = req.get("session_id", "")
+    req_id = req.get("req_id")
     sess = state.agent.session_mgr.get_session(session_id)
     if sess is None:
         await emit({
@@ -260,10 +372,13 @@ async def handle_switch_session(state: WorkerState, req: dict) -> None:
         })
     else:
         await emit({"type": "session", "session_id": session_id})
+        # 先发 session 事件让前端先 clearMessages / 切 currentSessionId，
+        # 再批量追加 history items，顺序与视觉一致
+        await _emit_history_for(state, session_id, req_id)
     await emit({
         "type": "done",
         "session_id": session_id,
-        "req_id": req.get("req_id"),
+        "req_id": req_id,
     })
 
 
@@ -271,6 +386,8 @@ async def handle_new_session(state: WorkerState, req: dict) -> None:
     title = req.get("title") or "新对话"
     sess = state.agent.session_mgr.create_session(title)
     await emit({"type": "session", "session_id": sess.id})
+    # 新会话必定无历史，但仍发一条空 history 事件，保证 UI 侧状态机对齐
+    await _emit_history_for(state, sess.id, req.get("req_id"))
     # 同步把最新列表也发一次
     await handle_list_sessions(state, {"req_id": req.get("req_id")})
 

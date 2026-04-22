@@ -1,16 +1,16 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import TextInput from "ink-text-input";
+import { SmartTextInput } from "../components/SmartTextInput.js";
 import Fuse from "fuse.js";
 import { useStore } from "../state/store.js";
 import { resolveTheme } from "../themes/index.js";
 import { CLIENT_COMMANDS } from "../utils/slashCommands.js";
 import { sendRequest, subscribeTransport } from "../state/wiring.js";
 import { useAgent } from "../hooks/useAgent.js";
+import { useScopedBindings } from "../keybindings/useKeybinding.js";
 
 export interface CommandPaletteProps {
   onClose(): void;
-  maxRows: number;
   onExit(): void;
   onOpenHistory(): void;
   onOpenMemory(): void;
@@ -31,7 +31,6 @@ interface PaletteItem {
  */
 export function CommandPalette({
   onClose,
-  maxRows,
   onExit,
   onOpenHistory,
   onOpenMemory,
@@ -41,6 +40,12 @@ export function CommandPalette({
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const [serverItems, setServerItems] = useState<PaletteItem[]>([]);
+
+  useScopedBindings("overlay-palette", [
+    { key: "up/down", description: "上/下移光标" },
+    { key: "return", description: "执行选中命令" },
+    { key: "escape", description: "关闭面板（由全局处理）" },
+  ]);
 
   // 打开面板立刻拉一次服务端命令
   useEffect(() => {
@@ -132,6 +137,9 @@ export function CommandPalette({
     }
   }
 
+  // 面板自读终端高度，保留 10 行给底部动态 UI（Header/Activity/Prompt/Status）
+  const termRows = useStore((s) => s.dims.rows);
+  const maxRows = Math.max(10, termRows - 10);
   const headerRows = 2;
   const listRows = Math.max(1, maxRows - headerRows - 2);
   const visible = filtered.slice(0, listRows);
@@ -146,7 +154,7 @@ export function CommandPalette({
         <Text color={theme.colors.primary} bold>
           ❯{" "}
         </Text>
-        <TextInput
+        <SmartTextInput
           value={query}
           onChange={setQuery}
           placeholder="输入关键字过滤命令…（Esc 关闭）"
